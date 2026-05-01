@@ -1,0 +1,43 @@
+.ofc-root {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0 4px;
+}
+
+.ofc-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.ofc-svg {
+  width: 100%;
+  height: auto;
+  max-height: 220px;
+  display: block;
+  border-radius: 6px;
+  background: rgba(0,0,0,0.25);
+}
+
+.ofc-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.ofc-leg {
+  font-size: 9px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 3px;
+}
+
+.ofc-leg-bsl  { color: #00ff88; background: rgba(0,255,136,0.08); }
+.ofc-leg-ssl  { color: #ff3e5e; background: rgba(255,62,94,0.08); }
+.ofc-leg-both { color: #f5c518; background: rgba(245,197,24,0.08); }
+.ofc-leg-lock { color: #f5c518; background: rgba(245,197,24,0.12); border: 1px solid rgba(245,197,24,0.3); }

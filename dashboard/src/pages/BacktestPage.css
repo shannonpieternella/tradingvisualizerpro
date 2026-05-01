@@ -1,0 +1,153 @@
+.bt-root {
+  min-height: 100vh;
+  background: var(--bg, #080e1a);
+  padding: 20px;
+  font-size: 12px;
+  color: var(--text-primary, #e0e8f0);
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Header */
+.bt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.bt-header-left { display: flex; align-items: center; gap: 14px; }
+.bt-back {
+  font-size: 11px; color: rgba(255,255,255,0.4);
+  text-decoration: none; transition: color 0.15s;
+}
+.bt-back:hover { color: #00d4ff; }
+.bt-title { font-size: 16px; font-weight: 700; color: rgba(255,255,255,0.85); margin: 0; }
+
+.bt-header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.bt-market-tabs { display: flex; gap: 4px; }
+.bt-mkt-tab {
+  font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 5px;
+  cursor: pointer; border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.4);
+  transition: all 0.15s;
+}
+.bt-mkt-active {
+  background: rgba(0,212,255,0.1); border-color: rgba(0,212,255,0.3); color: #00d4ff;
+}
+.bt-run-btn {
+  font-size: 11px; font-weight: 700; padding: 6px 14px; border-radius: 6px;
+  cursor: pointer; display: flex; align-items: center; gap: 6px;
+  background: rgba(0,212,255,0.12); border: 1px solid rgba(0,212,255,0.3);
+  color: #00d4ff; transition: background 0.15s;
+}
+.bt-run-btn:hover:not(:disabled) { background: rgba(0,212,255,0.2); }
+.bt-run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.bt-spin {
+  width: 10px; height: 10px; border-radius: 50%;
+  border: 1.5px solid rgba(0,212,255,0.3); border-top-color: #00d4ff;
+  animation: bt-spin 0.7s linear infinite; display: inline-block;
+}
+@keyframes bt-spin { to { transform: rotate(360deg); } }
+
+.bt-run-msg {
+  background: rgba(38,166,89,0.08); border: 1px solid rgba(38,166,89,0.2);
+  border-radius: 6px; padding: 8px 12px; font-size: 11px; color: #00cc66;
+}
+.bt-error {
+  background: rgba(232,64,64,0.08); border: 1px solid rgba(232,64,64,0.2);
+  border-radius: 6px; padding: 8px 12px; font-size: 11px; color: #e84040;
+  display: flex; gap: 6px;
+}
+
+/* Stats */
+.bt-stats-row {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+}
+.bt-stat-box {
+  background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px; padding: 12px; text-align: center;
+}
+.bt-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; color: rgba(255,255,255,0.3); }
+.bt-stat-value { font-size: 20px; font-weight: 700; margin: 4px 0; }
+.bt-stat-sub   { font-size: 9px; color: rgba(255,255,255,0.3); }
+
+/* Section */
+.bt-section { display: flex; flex-direction: column; gap: 8px; }
+.bt-section-title {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: rgba(255,255,255,0.3);
+  padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+/* Day cards */
+.bt-day-row { display: flex; gap: 8px; }
+.bt-day-card {
+  flex: 1; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 6px; padding: 10px; text-align: center;
+}
+.bt-day-name { font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.5); }
+.bt-day-wr   { font-size: 18px; font-weight: 700; margin: 4px 0; }
+.bt-day-sub  { font-size: 9px; color: rgba(255,255,255,0.3); }
+
+/* Signal table */
+.bt-signal-table { display: flex; flex-direction: column; gap: 2px; }
+.bt-signal-row {
+  display: grid; grid-template-columns: 2fr 1fr 1fr 1fr;
+  padding: 5px 8px; border-radius: 4px; font-size: 10px;
+}
+.bt-signal-head {
+  color: rgba(255,255,255,0.3); font-weight: 700; font-size: 9px;
+  text-transform: uppercase; letter-spacing: 0.07em;
+}
+.bt-signal-row:not(.bt-signal-head):hover { background: rgba(255,255,255,0.03); }
+.bt-signal-name { color: rgba(255,255,255,0.6); }
+
+/* Log table */
+.bt-loading { display: flex; align-items: center; gap: 8px; color: rgba(255,255,255,0.4); padding: 12px; }
+.bt-empty { color: rgba(255,255,255,0.3); font-size: 12px; padding: 16px; text-align: center; }
+.bt-log-table { display: flex; flex-direction: column; gap: 1px; }
+.bt-log-head {
+  display: grid;
+  grid-template-columns: 90px 40px 90px 70px 180px 60px 60px 70px;
+  padding: 5px 8px; color: rgba(255,255,255,0.3); font-size: 9px;
+  font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em;
+}
+.bt-log-row {
+  display: grid;
+  grid-template-columns: 90px 40px 90px 70px 180px 60px 60px 70px;
+  padding: 6px 8px; border-radius: 4px; font-size: 10px;
+  border: 1px solid transparent;
+  transition: background 0.1s;
+}
+.bt-log-row:hover { background: rgba(255,255,255,0.03); }
+.bt-row-win  { border-color: rgba(38,166,89,0.1); }
+.bt-row-loss { border-color: rgba(232,64,64,0.08); }
+.bt-log-date  { color: rgba(255,255,255,0.5); font-family: monospace; }
+.bt-log-day   { color: rgba(255,255,255,0.4); }
+.bt-log-conf  { color: rgba(255,255,255,0.45); }
+.bt-log-sig   { color: rgba(255,255,255,0.4); font-size: 9px; }
+.bt-log-price { font-family: monospace; color: rgba(255,255,255,0.55); }
+.bt-move-up   { color: #00cc66; font-weight: 700; }
+.bt-move-dn   { color: #e84040; font-weight: 700; }
+
+/* Badges */
+.bt-outcome {
+  font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px;
+  letter-spacing: 0.06em;
+}
+.bt-win     { background: rgba(38,166,89,0.15);  color: #00cc66; }
+.bt-loss    { background: rgba(232,64,64,0.15);  color: #e84040; }
+.bt-neutral { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.4); }
+.bt-bias { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px; }
+.bt-bull { background: rgba(38,166,89,0.1);  color: #00cc66; }
+.bt-bear { background: rgba(232,64,64,0.1);  color: #e84040; }
+.bt-neut { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.4); }
+
+@media (max-width: 768px) {
+  .bt-stats-row { grid-template-columns: repeat(2, 1fr); }
+  .bt-log-head, .bt-log-row { grid-template-columns: 80px 35px 80px 55px 1fr 50px 50px 60px; font-size: 9px; }
+}

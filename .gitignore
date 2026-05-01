@@ -1,0 +1,57 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Node deps
+node_modules/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Build output
+dashboard/dist/
+build/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# Transient runtime state under monitor/ — fed by the monitor/cron tick.
+# Code that builds these is in the repo; the data itself is regenerated.
+monitor/candles_*.json
+monitor/market_data_*.json
+monitor/setup_*.json
+monitor/setup_log*.json
+monitor/card_state_*.json
+monitor/sweep_state_*.json
+monitor/trade_history_*.json
+monitor/signal_history.json
+monitor/signal_state.json
+monitor/debug_log.json
+monitor/weekly_recap.json
+monitor/admin_bias.json
+monitor/market_state.json
+monitor/*.bak.*
+
+# fetch_candles + monitor logs
+monitor/fetch_candles.log
+monitor/monitor.log
+api/api.log
+monitor/api.log
+
+# Lock / temp
+/tmp/
+*.tmp
+*.lock

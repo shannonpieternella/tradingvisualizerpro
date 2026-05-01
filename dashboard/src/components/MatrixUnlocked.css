@@ -1,0 +1,159 @@
+.matrix-wrap {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ── Card ────────────────────────────────────────────────────────────────────── */
+/* Full Matrix Unlocked — confirmed + 6hr aligned */
+.matrix-card {
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: var(--bg2, #070b16);
+  border: 1px solid rgba(255, 213, 79, 0.25);
+  box-shadow: 0 0 20px rgba(255, 213, 79, 0.08);
+  font-size: 11px;
+}
+
+/* Aligned only — forming + 6hr aligned, not yet confirmed */
+.matrix-card.matrix-aligned {
+  border: 1px solid rgba(99, 179, 237, 0.15);
+  box-shadow: none;
+  opacity: 0.82;
+}
+
+.matrix-buy  { border-left: 4px solid var(--green, #00e5a0); }
+.matrix-sell { border-left: 4px solid var(--red, #ff5370); }
+
+/* ── Header ──────────────────────────────────────────────────────────────────── */
+.matrix-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.matrix-lock  { font-size: 16px; }
+.matrix-title {
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: .10em;
+  color: #ffd54f;
+}
+.matrix-title-aligned {
+  font-size: 12px;
+  color: var(--accent, #4fc3f7);
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+
+.matrix-dir { font-size: 12px; font-weight: 700; }
+.mdir-buy   { color: var(--green, #00e5a0); }
+.mdir-sell  { color: var(--red, #ff5370); }
+
+.matrix-status        { font-size: 9px; padding: 2px 8px; border-radius: 4px; font-weight: 700; }
+.mstatus-confirmed    { background: rgba(0,229,160,.20); color: var(--green, #00e5a0); }
+.mstatus-forming      { background: rgba(255,213,79,.16); color: #ffd54f; }
+
+.matrix-market-label { font-size: 11px; font-weight: 800; color: var(--text, #e8edf5); background: rgba(255,213,79,.10); padding: 1px 7px; border-radius: 4px; }
+.matrix-window { margin-left: auto; font-size: 10px; color: var(--accent, #4fc3f7); }
+
+/* ── Subtitle ─────────────────────────────────────────────────────────────────── */
+.matrix-subtitle {
+  font-size: 11px;
+  color: #ffd54f;
+  opacity: .85;
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  background: rgba(255, 213, 79, 0.07);
+  border-radius: 6px;
+}
+.matrix-subtitle-aligned {
+  color: var(--text-dim, #8899b4);
+  background: rgba(99, 179, 237, 0.05);
+}
+
+/* ── Section labels ──────────────────────────────────────────────────────────── */
+.matrix-section-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  color: var(--text-dim, #8899b4);
+  margin: 8px 0 4px;
+}
+
+/* ── Steps ───────────────────────────────────────────────────────────────────── */
+.matrix-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.matrix-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  line-height: 1.4;
+}
+
+.ms-num {
+  flex-shrink: 0;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  font-size: 9px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  margin-top: 1px;
+}
+
+.matrix-step.done .ms-num { background: rgba(0,229,160,.2); color: var(--green, #00e5a0); }
+.matrix-step.wait .ms-num { background: rgba(136,153,180,.12); color: var(--text-dim, #8899b4); }
+
+.matrix-step.done .ms-text { color: var(--text, #e8edf5); }
+.matrix-step.wait .ms-text { color: var(--text-dim, #8899b4); font-style: italic; }
+
+.ms-text strong { color: var(--accent, #4fc3f7); }
+.matrix-buy  .matrix-step.done .ms-text strong { color: var(--green, #00e5a0); }
+.matrix-sell .matrix-step.done .ms-text strong { color: var(--red, #ff5370); }
+
+/* ── 6hr alignment ───────────────────────────────────────────────────────────── */
+.matrix-sixhr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(0, 229, 160, 0.07);
+  border-radius: 6px;
+  border: 1px solid rgba(0, 229, 160, 0.15);
+}
+
+.sixhr-check { font-size: 13px; }
+.sixhr-text  { color: var(--text, #e8edf5); font-size: 11px; }
+
+.ms-live-tag {
+  display: inline-block;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255,213,79,0.15);
+  color: #ffd54f;
+  vertical-align: middle;
+  margin-left: 3px;
+}
+
+.ms-bos {
+  display: inline-block;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .10em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(0,212,255,0.15);
+  color: var(--cyan, #00d4ff);
+  vertical-align: middle;
+  margin-right: 3px;
+}

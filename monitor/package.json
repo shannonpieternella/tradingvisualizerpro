@@ -1,0 +1,13 @@
+{
+  "name": "blackbull-monitor",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node monitor.js"
+  },
+  "dependencies": {
+    "@openai/agents": "latest",
+    "mongodb": "^6.21.0",
+    "node-fetch": "^3.3.2"
+  }
+}

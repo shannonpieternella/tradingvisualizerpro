@@ -1,0 +1,97 @@
+.sf-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 8px 0 4px;
+}
+
+.sf-group {
+  display: flex;
+  gap: 4px;
+}
+
+.sf-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border, rgba(255,255,255,0.08));
+  flex-shrink: 0;
+}
+
+/* ── Pill button ─────────────────────────────────────────────────────────────── */
+.sf-pill {
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  border-radius: 20px;
+  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  background: var(--bg-card, #0d1421);
+  color: var(--text-muted, #8899b4);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.sf-pill:hover {
+  border-color: rgba(255,255,255,0.25);
+  color: var(--text-primary, #e8edf5);
+}
+
+/* Active state — neutral */
+.sf-pill.sf-active {
+  background: rgba(0,212,255,0.12);
+  border-color: rgba(0,212,255,0.45);
+  color: var(--cyan, #00d4ff);
+}
+
+/* BUY active */
+.sf-pill.sf-buy.sf-active {
+  background: rgba(0,229,160,0.12);
+  border-color: rgba(0,229,160,0.45);
+  color: var(--green, #00e5a0);
+}
+
+/* SELL active */
+.sf-pill.sf-sell.sf-active {
+  background: rgba(255,62,94,0.12);
+  border-color: rgba(255,62,94,0.45);
+  color: var(--red, #ff3e5e);
+}
+
+/* MATRIX active */
+.sf-pill.sf-matrix.sf-active {
+  background: rgba(255,213,79,0.12);
+  border-color: rgba(255,213,79,0.45);
+  color: #ffd54f;
+}
+
+/* Golden cycle */
+.sf-golden {
+  border-color: rgba(255,213,79,0.35) !important;
+}
+.sf-golden.sf-active {
+  background: rgba(255,213,79,0.18);
+  border-color: rgba(255,213,79,0.6) !important;
+  color: #ffd54f;
+}
+.sf-crown {
+  font-size: 9px;
+  margin-left: 3px;
+  vertical-align: middle;
+}
+
+/* Autonomous button */
+.sf-pill.sf-auto {
+  border-color: rgba(167,139,250,0.3);
+}
+.sf-pill.sf-auto-on.sf-active {
+  background: rgba(167,139,250,0.15);
+  border-color: rgba(167,139,250,0.6);
+  color: #a78bfa;
+  box-shadow: 0 0 8px rgba(167,139,250,0.25);
+}
+
+@media (max-width: 480px) {
+  .sf-pill { padding: 3px 8px; font-size: 9px; }
+}

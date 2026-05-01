@@ -1,0 +1,112 @@
+.market-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 0 0 4px;
+  scrollbar-width: none;
+}
+.market-tabs::-webkit-scrollbar { display: none; }
+
+/* ── Individual tab ────────────────────────────────────────────────────────── */
+.mt-tab {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+  min-width: 90px;
+}
+
+.mt-tab:hover {
+  border-color: rgba(0,212,255,0.35);
+  background: rgba(0,212,255,0.04);
+}
+
+.mt-tab-active {
+  border-color: rgba(0,212,255,0.5);
+  background: rgba(0,212,255,0.08);
+}
+
+.mt-tab-offline {
+  opacity: 0.45;
+}
+
+/* ── Tab top row ───────────────────────────────────────────────────────────── */
+.mt-tab-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mt-tab-name {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-primary);
+}
+
+.mt-tab-sub {
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+}
+
+/* Scanning dot — pulses when AI is currently analyzing this market */
+.mt-scanning-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 5px var(--cyan);
+  animation: mtPulse 1s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes mtPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.3; transform: scale(0.7); }
+}
+
+/* ── Status badge ──────────────────────────────────────────────────────────── */
+.mt-badge {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.mt-badge-signal      { background: rgba(0,255,136,0.18); color: #00ff88; border: 1px solid rgba(0,255,136,0.35); font-weight: 800; }
+.mt-badge-signal-bear { background: rgba(255,62,94,0.18);  color: #ff3e5e; border: 1px solid rgba(255,62,94,0.35);  font-weight: 800; }
+.mt-badge-upcoming    { background: rgba(0,212,255,0.12); color: var(--cyan);  }
+.mt-badge-win         { background: rgba(0,255,136,0.12); color: var(--green); }
+.mt-badge-loss        { background: rgba(255,62,94,0.12); color: var(--red);   }
+.mt-badge-stopped     { background: rgba(255,62,94,0.18); color: var(--red);   }
+.mt-badge-flat        { background: rgba(255,255,255,0.05); color: var(--text-muted); }
+.mt-badge-bias-bull   { background: rgba(0,255,136,0.08); color: rgba(0,255,136,0.7); border: 1px solid rgba(0,255,136,0.15); }
+.mt-badge-bias-bear   { background: rgba(255,62,94,0.08);  color: rgba(255,62,94,0.7);  border: 1px solid rgba(255,62,94,0.15); }
+.mt-badge-neutral     { background: rgba(255,255,255,0.04); color: var(--text-muted); }
+.mt-badge-idle        { background: rgba(255,255,255,0.04); color: var(--text-muted); }
+.mt-badge-offline     { background: rgba(255,255,255,0.04); color: var(--text-muted); }
+
+/* ── Price ─────────────────────────────────────────────────────────────────── */
+.mt-tab-price {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+
+/* ── Mobile ────────────────────────────────────────────────────────────────── */
+@media (max-width: 480px) {
+  .mt-tab { min-width: 80px; padding: 7px 10px; }
+  .mt-tab-price { font-size: 11px; }
+}

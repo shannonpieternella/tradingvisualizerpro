@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>BLACKBULL · Debug Panel</title>
+<style>
+  :root {
+    --bg: #0a0c10; --bg2: #111418; --bg3: #1a1e26;
+    --border: #252b36; --cyan: #00d4ff; --green: #00ff88;
+    --red: #ff3e5e; --yellow: #ffd700; --orange: #ff9500;
+    --muted: #4a5568; --text: #e2e8f0; --text2: #a0aec0;
+    --mono: 'Fira Mono', 'Consolas', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.5; }
+
+  header { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 14px; font-weight: 700; letter-spacing: .1em; color: var(--cyan); }
+  .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 1.5s infinite; flex-shrink: 0; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .refresh-info { margin-left: auto; color: var(--muted); font-size: 11px; }
+  .refresh-btn { background: var(--bg3); border: 1px solid var(--border); color: var(--cyan); padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 11px; font-family: var(--mono); }
+  .refresh-btn:hover { border-color: var(--cyan); }
+
+  .container { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; }
+
+  .markets-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+  @media (max-width: 600px) { .markets-row { grid-template-columns: 1fr; } }
+
+  .market-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .market-card.ok-false { border-color: var(--red); }
+
+  .mc-header { background: var(--bg3); padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); }
+  .mc-name { font-weight: 700; letter-spacing: .08em; font-size: 13px; }
+  .mc-symbol { font-size: 10px; color: var(--muted); }
+  .mc-age { font-size: 10px; padding: 2px 8px; border-radius: 4px; font-weight: 700; }
+  .age-ok   { background: rgba(0,255,136,.12); color: var(--green); }
+  .age-warn { background: rgba(255,149,0,.15);  color: var(--orange); }
+  .age-old  { background: rgba(255,62,94,.15);  color: var(--red); }
+
+  .mc-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+
+  .meta-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tag { font-size: 10px; padding: 2px 7px; border-radius: 4px; background: var(--bg3); border: 1px solid var(--border); color: var(--text2); }
+  .tag-cyan   { border-color: rgba(0,212,255,.3); color: var(--cyan); }
+  .tag-green  { border-color: rgba(0,255,136,.3); color: var(--green); }
+  .tag-red    { border-color: rgba(255,62,94,.3); color: var(--red); }
+  .tag-yellow { border-color: rgba(255,215,0,.3); color: var(--yellow); }
+  .tag-orange { border-color: rgba(255,149,0,.3); color: var(--orange); }
+
+  .cycle-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .cycle-table th { color: var(--muted); font-weight: 600; text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--border); }
+  .cycle-table td { padding: 4px 6px; border-bottom: 1px solid rgba(37,43,54,.5); }
+  .cycle-table tr:last-child td { border-bottom: none; }
+  .hit-yes { color: var(--green); }
+  .hit-no  { color: var(--muted); }
+  .status-open     { color: var(--green); font-weight: 700; }
+  .status-upcoming { color: var(--cyan); }
+  .status-passed   { color: var(--muted); }
+  .status-none     { color: var(--border); }
+
+  .signal-summary { background: var(--bg3); border-radius: 6px; padding: 8px 10px; }
+  .sig-row { display: flex; gap: 8px; align-items: center; margin-bottom: 3px; }
+  .sig-row:last-child { margin-bottom: 0; }
+  .sig-label { color: var(--muted); font-size: 10px; min-width: 70px; }
+  .sig-none { color: var(--muted); font-size: 11px; }
+
+  /* 90-min cycles */
+  .ninety-section { margin-top: 8px; }
+  .ninety-header { font-size: 10px; font-weight: 700; color: var(--muted); letter-spacing: .08em; margin-bottom: 4px; }
+  .ninety-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+  .ninety-table th { color: var(--muted); font-weight: 600; text-align: left; padding: 2px 5px; border-bottom: 1px solid var(--border); }
+  .ninety-table td { padding: 3px 5px; border-bottom: 1px solid rgba(37,43,54,.4); white-space: nowrap; }
+  .ninety-table tr:last-child td { border-bottom: none; }
+  .ninety-active { background: rgba(0,212,255,.05); }
+  .ninety-idx { color: var(--muted); font-size: 9px; }
+
+  /* Continuation signals */
+  .cont-section { margin-top: 8px; }
+  .cont-header { font-size: 10px; font-weight: 700; color: var(--muted); letter-spacing: .08em; margin-bottom: 4px; }
+  .cont-card { background: var(--bg3); border-radius: 6px; padding: 7px 10px; margin-bottom: 5px; border-left: 3px solid var(--border); font-size: 11px; }
+  .cont-card.cont-buy  { border-color: var(--green); }
+  .cont-card.cont-sell { border-color: var(--red); }
+  .cont-card.cont-confirmed { box-shadow: 0 0 8px rgba(0,255,136,.15); }
+  .cont-title { font-weight: 700; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+  .cont-step { color: var(--text2); margin-bottom: 2px; padding-left: 4px; }
+  .cont-step .step-ok  { color: var(--green); }
+  .cont-step .step-wait { color: var(--muted); }
+  .cont-window { font-size: 10px; color: var(--cyan); margin-top: 4px; }
+  .badge-confirmed { background: rgba(0,255,136,.15); color: var(--green); font-size: 9px; padding: 1px 6px; border-radius: 4px; font-weight: 700; }
+  .badge-forming   { background: rgba(255,215,0,.12);  color: var(--yellow); font-size: 9px; padding: 1px 6px; border-radius: 4px; font-weight: 700; }
+  .badge-passed    { background: rgba(74,85,104,.25);  color: var(--muted); font-size: 9px; padding: 1px 6px; border-radius: 4px; }
+  .cont-passed { opacity: .55; }
+  .cont-none { color: var(--muted); font-size: 11px; padding: 4px 0; }
+
+  /* Matrix Unlocked */
+  .matrix-section { margin-top: 8px; }
+  .matrix-header-debug { font-size: 10px; font-weight: 700; color: var(--yellow); letter-spacing: .08em; margin-bottom: 4px; }
+  .matrix-card-debug { background: var(--bg3); border-radius: 6px; padding: 8px 10px; margin-bottom: 5px; border: 1px solid rgba(255,215,0,.25); box-shadow: 0 0 10px rgba(255,215,0,.07); font-size: 11px; }
+  .matrix-card-debug.matrix-buy-debug  { border-left: 3px solid var(--green); }
+  .matrix-card-debug.matrix-sell-debug { border-left: 3px solid var(--red); }
+  .matrix-card-debug.matrix-aligned-debug { border-color: rgba(0,212,255,.15); box-shadow: none; opacity: .8; }
+  .matrix-title-debug { font-weight: 700; margin-bottom: 5px; display: flex; align-items: center; gap: 6px; color: var(--yellow); }
+  .matrix-title-debug.aligned-title { color: var(--cyan); font-size: 11px; }
+  .matrix-subtitle-debug { font-size: 10px; color: var(--yellow); opacity: .8; margin-bottom: 6px; padding: 4px 8px; background: rgba(255,215,0,.06); border-radius: 4px; }
+  .matrix-subtitle-debug.aligned-sub { color: var(--muted); background: rgba(0,212,255,.04); }
+  .matrix-sixhr-debug { margin-top: 5px; padding: 5px 8px; background: rgba(0,255,136,.06); border: 1px solid rgba(0,255,136,.15); border-radius: 4px; color: var(--green); font-size: 11px; }
+
+  .warn-box { background: rgba(255,62,94,.08); border: 1px solid rgba(255,62,94,.3); border-radius: 6px; padding: 6px 10px; color: var(--red); font-size: 11px; }
+
+  .log-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .log-header { background: var(--bg3); padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .log-header h2 { font-size: 12px; font-weight: 700; letter-spacing: .08em; }
+  .log-lines-ctrl { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  .log-lines-ctrl label { font-size: 10px; color: var(--muted); }
+  .log-lines-ctrl select { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 2px 6px; border-radius: 4px; font-family: var(--mono); font-size: 11px; }
+  .log-body { padding: 0; overflow-y: auto; max-height: 500px; }
+  pre#log-pre { padding: 12px 14px; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: var(--text2); }
+
+  .log-ok     { color: var(--green); }
+  .log-warn   { color: var(--orange); }
+  .log-err    { color: var(--red); }
+  .log-market { color: var(--cyan); font-weight: 700; }
+  .log-head   { color: var(--yellow); }
+
+  .error-state { padding: 20px; color: var(--red); text-align: center; }
+
+  .history-panel { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .history-header { background: var(--bg3); padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .history-header h2 { font-size: 12px; font-weight: 700; letter-spacing: .08em; }
+  .history-filter { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  .history-filter label { font-size: 10px; color: var(--muted); }
+  .history-filter select { background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 2px 6px; border-radius: 4px; font-family: var(--mono); font-size: 11px; }
+  .history-body { padding: 10px 14px; }
+  .history-empty { color: var(--muted); font-size: 11px; padding: 16px 0; text-align: center; }
+  .history-stats { display: flex; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+  .stat-box { background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 11px; }
+  .stat-box span { font-weight: 700; font-size: 13px; }
+  .stat-win  { border-color: rgba(0,255,136,.3); }
+  .stat-loss { border-color: rgba(255,62,94,.3); }
+  .stat-wr   { border-color: rgba(0,212,255,.3); }
+  .history-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .history-table th { color: var(--muted); font-weight: 600; text-align: left; padding: 3px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .history-table td { padding: 5px 8px; border-bottom: 1px solid rgba(37,43,54,.5); vertical-align: middle; }
+  .history-table tr:last-child td { border-bottom: none; }
+  .result-win  { color: var(--green); font-weight: 700; }
+  .result-loss { color: var(--red); font-weight: 700; }
+  .close-sl   { color: var(--red); font-size: 10px; }
+  .close-tp   { color: var(--green); font-size: 10px; }
+  .close-opp  { color: var(--orange); font-size: 10px; }
+  .type-short { color: var(--red); }
+  .type-long  { color: var(--green); }
+</style>
+</head>
+<body>
+<header>
+  <div class="live-dot" id="dot"></div>
+  <h1>BLACKBULL · DEBUG PANEL</h1>
+  <span id="status-text" style="font-size:11px;color:var(--muted)">Laden...</span>
+  <span class="refresh-info" id="refresh-info"></span>
+  <button class="refresh-btn" onclick="loadAll()">↺ Ververs</button>
+</header>
+
+<div class="container">
+  <div class="markets-row" id="markets-row">
+    <div style="color:var(--muted);padding:20px">Laden...</div>
+  </div>
+  <div class="history-panel">
+    <div class="history-header">
+      <h2>🏆 TRADE HISTORY — WIN / LOSS</h2>
+      <div class="history-filter">
+        <label>Markt:</label>
+        <select id="history-market" onchange="loadHistory()">
+          <option value="">Alle</option>
+          <option value="NAS100">NAS100</option>
+          <option value="US500">US500</option>
+          <option value="US30">US30</option>
+          <option value="XAUUSD">XAUUSD</option>
+          <option value="GBPUSD">GBPUSD</option>
+        </select>
+      </div>
+    </div>
+    <div class="history-body" id="history-body">
+      <div class="history-empty">Laden...</div>
+    </div>
+  </div>
+
+  <div class="log-panel">
+    <div class="log-header">
+      <h2>📋 MONITOR LOG</h2>
+      <div class="log-lines-ctrl">
+        <label>Regels:</label>
+        <select id="log-lines" onchange="loadLog()">
+          <option value="100">100</option>
+          <option value="200" selected>200</option>
+          <option value="500">500</option>
+          <option value="1000">1000</option>
+        </select>
+      </div>
+    </div>
+    <div class="log-body"><pre id="log-pre">Laden...</pre></div>
+  </div>
+</div>
+
+<script>
+let lastRefresh = null;
+const REFRESH_SEC = 30;
+
+function ageClass(sec) {
+  if (sec < 3700)  return 'age-ok';
+  if (sec < 10800) return 'age-warn';
+  return 'age-old';
+}
+
+function statusClass(s) {
+  if (!s) return 'status-none';
+  if (s === 'open')     return 'status-open';
+  if (s === 'upcoming') return 'status-upcoming';
+  if (s === 'passed')   return 'status-passed';
+  return '';
+}
+
+function fmtPrice(p, sym) {
+  if (p == null) return '—';
+  if (sym && sym.includes('GBPUSD')) return p.toFixed(5);
+  if (p > 1000) return p.toLocaleString('en-US', {minimumFractionDigits:1,maximumFractionDigits:2});
+  return p.toFixed(5);
+}
+
+function renderMarket(key, d) {
+  if (!d || !d.ok) {
+    return `<div class="market-card ok-false">
+      <div class="mc-header"><span class="mc-name">${key}</span></div>
+      <div class="mc-body"><div class="warn-box">❌ ${d?.error ?? 'Geen data'}</div></div>
+    </div>`;
+  }
+
+  const ageC = ageClass(d.fileAgeSec);
+  const sym = d.symbol;
+
+  const cycleRows = d.cycles.map(c => {
+    const hh = c.hitHigh ? `<span class="hit-yes">✓ ${fmtPrice(c.hitHigh.price,sym)} @ ${c.hitHigh.time}</span>` : `<span class="hit-no">—</span>`;
+    const hl = c.hitLow  ? `<span class="hit-yes">✓ ${fmtPrice(c.hitLow.price,sym)} @ ${c.hitLow.time}</span>` : `<span class="hit-no">—</span>`;
+    const ehS = c.entryHigh?.status;
+    const elS = c.entryLow?.status;
+    const ehCell = ehS ? `<span class="${statusClass(ehS)}">${ehS.toUpperCase()} · ${c.entryHigh.window}</span>` : `<span class="status-none">—</span>`;
+    const elCell = elS ? `<span class="${statusClass(elS)}">${elS.toUpperCase()} · ${c.entryLow.window}</span>` : `<span class="status-none">—</span>`;
+    return `<tr>
+      <td style="color:var(--text2);font-weight:700">${c.name}</td>
+      <td>${fmtPrice(c.high,sym)}</td><td>${hh}</td><td>${ehCell}</td>
+      <td>${fmtPrice(c.low,sym)}</td><td>${hl}</td><td>${elCell}</td>
+    </tr>`;
+  }).join('');
+
+  const sig = d.signal;
+  const sigActive   = sig.active.length   ? sig.active.map(s   => `<span class="tag tag-red">${s.type} ${s.cycle} @ ${fmtPrice(s.entry,sym)} t/m ${s.until}</span>`).join(' ')   : null;
+  const sigUpcoming = sig.upcoming.length ? sig.upcoming.map(s => `<span class="tag tag-cyan">${s.type} ${s.cycle} window ${s.window}</span>`).join(' ')   : null;
+  const sigRecent   = sig.recent.length   ? sig.recent.map(s   => `<span class="tag tag-orange">${s.type} ${s.cycle} GEMIST ${s.agoMin}m</span>`).join(' ') : null;
+
+  const sigHtml = `<div class="signal-summary">
+    <div class="sig-row"><span class="sig-label">ACTIEF</span>${sigActive ?? '<span class="sig-none">—</span>'}</div>
+    <div class="sig-row"><span class="sig-label">UPCOMING</span>${sigUpcoming ?? '<span class="sig-none">—</span>'}</div>
+    <div class="sig-row"><span class="sig-label">GEMIST</span>${sigRecent ?? '<span class="sig-none">—</span>'}</div>
+  </div>`;
+
+  // ── 90-min cycles tabel ───────────────────────────────────────────────────
+  const nowMins = (() => {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone:'America/New_York', hourCycle:'h23', hour:'2-digit', minute:'2-digit' }).formatToParts(new Date());
+    const h = parseInt(parts.find(p=>p.type==='hour').value);
+    const m = parseInt(parts.find(p=>p.type==='minute').value);
+    const etH = h + m/60;
+    // minutes into trading day (day starts 18:00 ET)
+    return etH >= 18 ? (etH - 18)*60 : (etH + 6)*60;
+  })();
+
+  const cycles90 = d.cycles90 ?? [];
+  const ninety90Rows = cycles90.map(c => {
+    const isActive = nowMins >= c.startMin && nowMins < c.endMin;
+    const hh = c.hitHigh ? `<span class="hit-yes">✓ ${fmtPrice(c.hitHigh.hitPrice,sym)} @ ${c.hitHigh.time}</span>` : `<span class="hit-no">—</span>`;
+    const hl = c.hitLow  ? `<span class="hit-yes">✓ ${fmtPrice(c.hitLow.hitPrice,sym)} @ ${c.hitLow.time}</span>` : `<span class="hit-no">—</span>`;
+    return `<tr class="${isActive ? 'ninety-active' : ''}">
+      <td><span class="ninety-idx">#${c.index}</span></td>
+      <td style="color:var(--text2)">${c.label}</td>
+      <td style="color:var(--cyan)">${fmtPrice(c.high,sym)}</td>
+      <td>${hh}</td>
+      <td style="color:var(--orange)">${fmtPrice(c.low,sym)}</td>
+      <td>${hl}</td>
+    </tr>`;
+  }).join('');
+
+  const ninetyHtml = `<div class="ninety-section">
+    <div class="ninety-header">▸ 90-MIN CYCLES (6u ÷ 4)</div>
+    ${cycles90.length ? `<table class="ninety-table">
+      <thead><tr>
+        <th>#</th><th>Tijden ET</th>
+        <th>High</th><th>High gebroken?</th>
+        <th>Low</th><th>Low gebroken?</th>
+      </tr></thead>
+      <tbody>${ninety90Rows}</tbody>
+    </table>` : '<span style="color:var(--muted);font-size:11px">Geen data</span>'}
+  </div>`;
+
+  // ── Continuation signals ──────────────────────────────────────────────────
+  const contSigs = d.continuationSignals ?? [];
+  function renderContCard(s, isPassed) {
+    const isBuy      = s.type === 'BUY';
+    const arrow      = isBuy ? '▲' : '▼';
+    const colorClass = isBuy ? 'cont-buy' : 'cont-sell';
+    const badge      = s.status === 'confirmed' ? '<span class="badge-confirmed">BEVESTIGD</span>' : '<span class="badge-forming">FORMING</span>';
+    const passedBadge = isPassed ? '<span class="badge-passed">VOORBIJ</span>' : '';
+    const confClass  = s.status === 'confirmed' ? 'cont-confirmed' : '';
+    const passedClass = isPassed ? 'cont-passed' : '';
+    const winLabel   = s.entryWindow ? `${s.entryWindow.cycle} · ${s.entryWindow.label} ET` : '—';
+    const winStatus  = s.windowStatus ? s.windowStatus.toUpperCase() : '';
+    const winClass   = s.windowStatus === 'open' ? 'status-open' : s.windowStatus === 'upcoming' ? 'status-upcoming' : 'status-passed';
+
+    const step1Html = isBuy
+      ? `<div class="cont-step"><span class="step-ok">✓ Stap 1</span> Break boven 90m #${s.buysideCycleIndex} (${s.buysideCycleLabel}) HIGH <strong>${fmtPrice(s.buysideCycleHigh,sym)}</strong> @ ${s.buysideBreakTime}</div>`
+      : `<div class="cont-step"><span class="step-ok">✓ Stap 1</span> Break onder 90m #${s.sellsideCycleIndex} (${s.sellsideCycleLabel}) LOW <strong>${fmtPrice(s.sellsideCycleLow,sym)}</strong> @ ${s.sellsideBreakTime}</div>`;
+
+    const step2Html = isBuy
+      ? `<div class="cont-step"><span class="step-ok">✓ Stap 2</span> Sellside 90m #${s.sellsideCycleIndex} (${s.sellsideCycleLabel}) LOW ${fmtPrice(s.sellsideCycleLow,sym)} geraakt @ ${s.sellsideHitTime} — hit: ${fmtPrice(s.sellsideHitPrice,sym)}</div>`
+      : `<div class="cont-step"><span class="step-ok">✓ Stap 2</span> Buyside 90m #${s.buysideCycleIndex} (${s.buysideCycleLabel}) HIGH ${fmtPrice(s.buysideCycleHigh,sym)} geraakt @ ${s.buysideHitTime} — hit: ${fmtPrice(s.buysideHitPrice,sym)}</div>`;
+
+    const step3Html = s.status === 'confirmed'
+      ? (isBuy
+        ? `<div class="cont-step"><span class="step-ok">✓ Stap 3</span> Buyside HIGH ${fmtPrice(s.confirmBuysideHigh ?? s.buysideCycleHigh,sym)} geraakt @ ${s.breakConfirmedTime} — <strong>BUY BEVESTIGD</strong></div>`
+        : `<div class="cont-step"><span class="step-ok">✓ Stap 3</span> Sellside LOW ${fmtPrice(s.confirmSellsideLow ?? s.sellsideCycleLow,sym)} geraakt @ ${s.breakConfirmedTime} — <strong>SELL BEVESTIGD</strong></div>`)
+      : (isBuy
+        ? `<div class="cont-step"><span class="step-wait">⏳ Stap 3</span> Wacht op buyside HIGH <strong>${fmtPrice(s.confirmBuysideHigh ?? s.buysideCycleHigh,sym)}</strong></div>`
+        : `<div class="cont-step"><span class="step-wait">⏳ Stap 3</span> Wacht op sellside LOW <strong>${fmtPrice(s.confirmSellsideLow ?? s.sellsideCycleLow,sym)}</strong></div>`);
+
+    // Trade levels for confirmed signals
+    let tradeLevelsHtml = '';
+    if (s.status === 'confirmed' && s.tradeSetup && s.tradeProgress) {
+      const ts = s.tradeSetup, tp = s.tradeProgress;
+      const outcomeColor = tp.outcome === 'win' ? 'var(--green)' : tp.outcome === 'loss' ? 'var(--red)' : 'var(--cyan)';
+      const outcomeBadge = tp.outcome === 'win' ? '✅ WIN' : tp.outcome === 'loss' ? '❌ LOSS' : `⏳ OPEN · ${fmtPrice(tp.currentPrice,sym)}`;
+      const pnlStr = tp.pnl >= 0 ? `+${tp.pnl}` : `${tp.pnl}`;
+      tradeLevelsHtml = `<div style="background:rgba(0,0,0,.25);border-radius:5px;padding:6px 8px;margin:5px 0;font-size:10px;border-left:2px solid ${outcomeColor}">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;flex-wrap:wrap">
+          <span style="color:var(--muted)">TRADE</span>
+          <span style="color:${outcomeColor};font-weight:700">${outcomeBadge}</span>
+          <span style="color:${tp.pnl >= 0 ? 'var(--green)' : 'var(--red)'};margin-left:auto">${pnlStr} pts</span>
+        </div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          <span><span style="color:var(--muted)">Entry </span><span style="color:var(--cyan)">${fmtPrice(ts.entry,sym)}</span></span>
+          <span><span style="color:var(--muted)">SL </span><span style="color:var(--red)">${fmtPrice(ts.sl,sym)}${tp.slHit ? ` ❌ @ ${tp.slHit.time}` : ''}</span></span>
+          <span><span style="color:var(--muted)">TP </span><span style="color:var(--green)">${fmtPrice(ts.tp,sym)}${tp.tpHit ? ` ✅ @ ${tp.tpHit.time}` : ''}</span></span>
+        </div>
+      </div>`;
+    }
+
+    return `<div class="cont-card ${colorClass} ${confClass} ${passedClass}">
+      <div class="cont-title">${arrow} ${s.type} ${badge} ${passedBadge} <span class="${winClass}" style="margin-left:auto;font-size:10px">⏱ ${winLabel} · ${winStatus}</span></div>
+      ${tradeLevelsHtml}${step1Html}${step2Html}${step3Html}
+    </div>`;
+  }
+
+  // Confirmed always stays active (same logic as dashboard component)
+  const contActive = contSigs.filter(s => s.status === 'confirmed' || s.windowStatus !== 'passed');
+  const contPassed = contSigs.filter(s => s.status !== 'confirmed' && s.windowStatus === 'passed');
+
+  // Day stats
+  const dayStats = d.continuationDayStats;
+  const dayStatsHtml = dayStats && dayStats.total > 0 ? `
+    <div style="display:flex;align-items:center;gap:8px;padding:5px 8px;background:rgba(0,212,255,.05);border:1px solid rgba(0,212,255,.1);border-radius:5px;font-size:10px;margin-bottom:5px;flex-wrap:wrap;">
+      <span style="color:var(--muted);font-weight:700;letter-spacing:.06em">VANDAAG</span>
+      <span style="color:var(--green);font-weight:700">✅ ${dayStats.wins} WIN</span>
+      <span style="color:var(--red);font-weight:700">❌ ${dayStats.losses} LOSS</span>
+      ${dayStats.open > 0 ? `<span style="color:var(--yellow);font-weight:700">⏳ ${dayStats.open} OPEN</span>` : ''}
+      ${dayStats.winRate !== null ? `<span style="margin-left:auto;font-weight:700;color:${dayStats.winRate >= 50 ? 'var(--green)' : 'var(--red)'}">${dayStats.winRate}% winrate</span>` : ''}
+    </div>` : '';
+
+  let contCardsHtml;
+  if (contSigs.length === 0) {
+    contCardsHtml = `<div class="cont-none">— geen continuation setup gedetecteerd vandaag</div>`;
+  } else {
+    contCardsHtml = dayStatsHtml;
+    contCardsHtml += contActive.map(s => renderContCard(s, false)).join('');
+    if (contPassed.length > 0) {
+      contCardsHtml += `<div style="font-size:9px;letter-spacing:.1em;color:var(--muted);margin:6px 0 4px;padding:0 2px">VANDAAG GEWEEST</div>`;
+      contCardsHtml += contPassed.map(s => renderContCard(s, true)).join('');
+    }
+  }
+
+  const contHtml = `<div class="cont-section">
+    <div class="cont-header">▸ CONTINUATION SIGNALS (90-min cycle confirmatie)</div>
+    ${contCardsHtml}
+  </div>`;
+
+  // ── Matrix Unlocked ──────────────────────────────────────────────────────
+  const matrixSigs = d.matrixUnlocked ?? [];
+  function renderMatrixCard(mu) {
+    const isBuy      = mu.matrixType === 'BUY';
+    const arrow      = isBuy ? '▲' : '▼';
+    const dirColor   = isBuy ? 'var(--green)' : 'var(--red)';
+    const sideClass  = isBuy ? 'matrix-buy-debug' : 'matrix-sell-debug';
+    const isUnlocked = mu.matrixLevel === 'unlocked';
+    const alignClass = isUnlocked ? '' : 'matrix-aligned-debug';
+    const badge      = mu.status === 'confirmed' ? '<span class="badge-confirmed">BEVESTIGD</span>' : '<span class="badge-forming">FORMING</span>';
+    const winLabel   = mu.entryWindow ? `${mu.entryWindow.cycle} · ${mu.entryWindow.label} ET` : '—';
+    const icon       = isUnlocked ? '🔓' : '⚡';
+    const titleText  = isUnlocked ? 'MATRIX UNLOCKED' : 'ALIGNED';
+    const titleClass = isUnlocked ? '' : 'aligned-title';
+    const subText    = isUnlocked ? '💎 Dubbele bevestiging — 90min continuation + 6hr cycle aligned' : '⏳ 6hr cycle aligned — wacht op break bevestiging';
+    const subClass   = isUnlocked ? '' : 'aligned-sub';
+
+    const s1 = isBuy
+      ? `<div class="cont-step"><span class="step-ok">90m ✓ 1</span> Break boven 90m #${mu.buysideCycleIndex} (${mu.buysideCycleLabel}) HIGH <strong>${fmtPrice(mu.buysideCycleHigh,sym)}</strong> @ ${mu.buysideBreakTime}</div>`
+      : `<div class="cont-step"><span class="step-ok">90m ✓ 1</span> Break onder 90m #${mu.sellsideCycleIndex} (${mu.sellsideCycleLabel}) LOW <strong>${fmtPrice(mu.sellsideCycleLow,sym)}</strong> @ ${mu.sellsideBreakTime}</div>`;
+    const s2 = isBuy
+      ? `<div class="cont-step"><span class="step-ok">90m ✓ 2</span> Sellside 90m #${mu.sellsideCycleIndex} LOW ${fmtPrice(mu.sellsideCycleLow,sym)} geraakt @ ${mu.sellsideHitTime}</div>`
+      : `<div class="cont-step"><span class="step-ok">90m ✓ 2</span> Buyside 90m #${mu.buysideCycleIndex} HIGH ${fmtPrice(mu.buysideCycleHigh,sym)} geraakt @ ${mu.buysideHitTime}</div>`;
+    const s3 = mu.status === 'confirmed'
+      ? (isBuy
+        ? `<div class="cont-step"><span class="step-ok">90m ✓ 3</span> Buyside HIGH ${fmtPrice(mu.confirmBuysideHigh ?? mu.buysideCycleHigh,sym)} geraakt @ ${mu.breakConfirmedTime} — <strong>BUY ✓</strong></div>`
+        : `<div class="cont-step"><span class="step-ok">90m ✓ 3</span> Sellside LOW ${fmtPrice(mu.confirmSellsideLow ?? mu.sellsideCycleLow,sym)} geraakt @ ${mu.breakConfirmedTime} — <strong>SELL ✓</strong></div>`)
+      : (isBuy
+        ? `<div class="cont-step"><span class="step-wait">90m ⏳ 3</span> Wacht op buyside HIGH ${fmtPrice(mu.confirmBuysideHigh ?? mu.buysideCycleHigh,sym)}</div>`
+        : `<div class="cont-step"><span class="step-wait">90m ⏳ 3</span> Wacht op sellside LOW ${fmtPrice(mu.confirmSellsideLow ?? mu.sellsideCycleLow,sym)}</div>`);
+
+    return `<div class="matrix-card-debug ${sideClass} ${alignClass}">
+      <div class="matrix-title-debug ${titleClass}">${icon} ${titleText} <span style="color:${dirColor}">${arrow} ${mu.matrixType}</span> ${badge} <span style="margin-left:auto;font-size:10px;color:var(--cyan)">${winLabel}</span></div>
+      <div class="matrix-subtitle-debug ${subClass}">${subText}</div>
+      ${s1}${s2}${s3}
+      <div class="matrix-sixhr-debug">✅ 6hr ${mu.sixHrSide} ${fmtPrice(mu.sixHrLevel,sym)} (${mu.sixHrCycle}) geraakt @ ${mu.sixHrHitTime}</div>
+    </div>`;
+  }
+
+  const matrixHtml = `<div class="matrix-section">
+    <div class="matrix-header-debug">▸ MATRIX UNLOCKED / ALIGNED (continuation + 6hr)</div>
+    ${matrixSigs.length ? matrixSigs.map(renderMatrixCard).join('') : '<div class="cont-none">— geen matrix unlocked / aligned</div>'}
+  </div>`;
+
+  const tradeHtml = d.activeTrade
+    ? `<div class="sig-row"><span class="tag tag-yellow">TRADE: ${d.activeTrade.type} ${d.activeTrade.cycle} @ ${fmtPrice(d.activeTrade.entry,sym)}</span></div>`
+    : '';
+
+  const warnHtml = d.warnings.length ? d.warnings.map(w => `<div class="warn-box">${w}</div>`).join('') : '';
+
+  return `<div class="market-card">
+    <div class="mc-header">
+      <div><div class="mc-name">${key}</div><div class="mc-symbol">${sym}</div></div>
+      <span class="mc-age ${ageC}">${d.fileAgeStr} oud</span>
+    </div>
+    <div class="mc-body">
+      ${warnHtml}
+      <div class="meta-row">
+        <span class="tag tag-cyan">💰 ${fmtPrice(d.currentPrice,sym)}</span>
+        <span class="tag">🕐 ${d.currentTime} ET</span>
+        <span class="tag tag-yellow">Cyclus: ${d.activeCycle}</span>
+        <span class="tag">${d.candleCount ?? '?'} candles</span>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">📅 ${d.candleRange ?? '—'}</div>
+      <table class="cycle-table">
+        <thead><tr>
+          <th>Cyclus</th>
+          <th>High</th><th>Hit HIGH?</th><th>Entry HIGH</th>
+          <th>Low</th><th>Hit LOW?</th><th>Entry LOW</th>
+        </tr></thead>
+        <tbody>${cycleRows}</tbody>
+      </table>
+      ${matrixHtml}
+      ${contHtml}
+      ${ninetyHtml}
+      ${sigHtml}
+      ${tradeHtml}
+    </div>
+  </div>`;
+}
+
+function colorizeLog(text) {
+  return text.split('\n').map(line => {
+    if (line.includes('═══') || line.includes('══════')) return `<span class="log-head">${esc(line)}</span>`;
+    if (/\[NAS100\]|\[US500\]|\[US30\]|\[XAUUSD\]|\[GBPUSD\]/.test(line)) return `<span class="log-market">${esc(line)}</span>`;
+    if (/✅|market_data written|Switch confirmed/.test(line)) return `<span class="log-ok">${esc(line)}</span>`;
+    if (/⚠️|warn|WARN|stale/i.test(line)) return `<span class="log-warn">${esc(line)}</span>`;
+    if (/error|Error|ERROR|❌|mislukt|failed/i.test(line)) return `<span class="log-err">${esc(line)}</span>`;
+    return esc(line);
+  }).join('\n');
+}
+
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+async function loadHistory() {
+  const market = document.getElementById('history-market').value;
+  const url = market ? `/api/trade-history?market=${market}` : '/api/trade-history';
+  const body = document.getElementById('history-body');
+  try {
+    const r = await fetch(url);
+    const d = await r.json();
+    const trades = d.trades ?? [];
+    if (!trades.length) {
+      body.innerHTML = '<div class="history-empty">Nog geen afgesloten trades — resultaten verschijnen hier zodra een trade sluit via SL of TP.</div>';
+      return;
+    }
+    const wins  = trades.filter(t => t.result === 'WIN').length;
+    const losses = trades.filter(t => t.result === 'LOSS').length;
+    const wr = trades.length ? Math.round(wins / trades.length * 100) : 0;
+
+    const closeLabel = r => {
+      if (r === 'SL_HIT')         return `<span class="close-sl">SL geraakt</span>`;
+      if (r === 'TP_DAY_HIT')     return `<span class="close-tp">TP Dag</span>`;
+      if (r === 'CLOSED_OPPOSITE') return `<span class="close-opp">Opp. hit</span>`;
+      return `<span>${r}</span>`;
+    };
+
+    const rows = trades.map(t => {
+      const sym = t.market;
+      const fp = p => p == null ? '—' : (sym === 'GBPUSD' ? p.toFixed(5) : p > 1000 ? p.toLocaleString('en-US',{minimumFractionDigits:1,maximumFractionDigits:1}) : p.toFixed(5));
+      return `<tr>
+        <td style="color:var(--muted);font-size:10px">${t.timeET ?? '—'}</td>
+        <td><span class="tag" style="font-size:10px">${t.market}</span></td>
+        <td class="${t.type === 'SHORT' ? 'type-short' : 'type-long'}">${t.type}</td>
+        <td style="color:var(--text2)">${t.cycle}</td>
+        <td>${fp(t.entry)}</td>
+        <td style="color:var(--muted)">${fp(t.sl)}</td>
+        <td>${fp(t.tp1)}${t.tp1Cycle ? ` <span style="color:var(--muted);font-size:9px">(${t.tp1Cycle})</span>` : ''}</td>
+        <td>${fp(t.closePrice)}</td>
+        <td>${closeLabel(t.closeReason)}</td>
+        <td class="${t.result === 'WIN' ? 'result-win' : 'result-loss'}">${t.result === 'WIN' ? '✅ WIN' : '❌ LOSS'}</td>
+      </tr>`;
+    }).join('');
+
+    body.innerHTML = `
+      <div class="history-stats">
+        <div class="stat-box stat-win">WIN <span style="color:var(--green)">${wins}</span></div>
+        <div class="stat-box stat-loss">LOSS <span style="color:var(--red)">${losses}</span></div>
+        <div class="stat-box stat-wr">Winrate <span style="color:var(--cyan)">${wr}%</span></div>
+        <div class="stat-box">Trades <span>${trades.length}</span></div>
+      </div>
+      <table class="history-table">
+        <thead><tr>
+          <th>Tijd (ET)</th><th>Markt</th><th>Type</th><th>Cycle</th>
+          <th>Entry</th><th>SL</th><th>TP1</th><th>Close</th><th>Reden</th><th>Resultaat</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  } catch (e) {
+    body.innerHTML = `<div class="history-empty" style="color:var(--red)">Fout: ${e.message}</div>`;
+  }
+}
+
+async function loadDebug() {
+  try {
+    const r = await fetch('/api/debug');
+    const d = await r.json();
+    document.getElementById('status-text').textContent =
+      `Server: ${d.serverTime ? new Date(d.serverTime).toLocaleTimeString('nl') : '?'} · Monitor: ${d.lastMonitorRun ? new Date(d.lastMonitorRun).toLocaleTimeString('nl') : '?'}`;
+    document.getElementById('markets-row').innerHTML =
+      Object.entries(d.markets).map(([k,v]) => renderMarket(k,v)).join('');
+  } catch (e) {
+    document.getElementById('markets-row').innerHTML = `<div class="error-state">❌ API niet bereikbaar: ${e.message}</div>`;
+  }
+}
+
+async function loadLog() {
+  const lines = document.getElementById('log-lines').value;
+  try {
+    const r = await fetch(`/api/logs?lines=${lines}`);
+    const text = await r.text();
+    const pre = document.getElementById('log-pre');
+    pre.innerHTML = colorizeLog(text);
+    pre.parentElement.scrollTop = pre.parentElement.scrollHeight;
+  } catch (e) {
+    document.getElementById('log-pre').textContent = `Fout: ${e.message}`;
+  }
+}
+
+function updateRefreshInfo() {
+  if (!lastRefresh) return;
+  const sec = Math.round((Date.now() - lastRefresh) / 1000);
+  document.getElementById('refresh-info').textContent = `Vernieuwd ${sec}s geleden · auto ${REFRESH_SEC}s`;
+}
+
+async function loadAll() {
+  document.getElementById('dot').style.background = 'var(--orange)';
+  await Promise.all([loadDebug(), loadLog(), loadHistory()]);
+  lastRefresh = Date.now();
+  document.getElementById('dot').style.background = 'var(--green)';
+  updateRefreshInfo();
+}
+
+loadAll();
+setInterval(loadAll, REFRESH_SEC * 1000);
+setInterval(updateRefreshInfo, 1000);
+</script>
+</body>
+</html>

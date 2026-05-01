@@ -1,0 +1,173 @@
+.chart-view {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  height: 440px;
+}
+
+/* Fullscreen — browser native fullscreen fills entire screen */
+.chart-view:-webkit-full-screen { height: 100vh; border-radius: 0; }
+.chart-view:-moz-full-screen    { height: 100vh; border-radius: 0; }
+.chart-view:fullscreen          { height: 100vh; border-radius: 0; }
+
+/* ── Header ──────────────────────────────────────────────────────────────────── */
+.cv-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(0,0,0,0.25);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.cv-market-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cv-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 6px var(--cyan);
+  animation: cvPulse 2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
+@keyframes cvPulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+.cv-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.06em;
+}
+
+.cv-timeframe {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(0,212,255,0.12);
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+}
+
+.cv-markets {
+  display: flex;
+  gap: 5px;
+  margin-left: auto;
+}
+
+.cv-market-pill {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.04em;
+}
+
+.cv-pill-active {
+  background: rgba(0,212,255,0.18);
+  color: var(--cyan);
+  border: 1px solid rgba(0,212,255,0.3);
+}
+
+.cv-pill-idle {
+  background: rgba(255,255,255,0.04);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.cv-updated {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+/* ── Fullscreen button ───────────────────────────────────────────────────────── */
+.cv-fs-btn {
+  margin-left: 8px;
+  flex-shrink: 0;
+  padding: 3px 8px;
+  font-size: 14px;
+  line-height: 1;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.cv-fs-btn:hover {
+  background: rgba(0,212,255,0.12);
+  border-color: rgba(0,212,255,0.35);
+  color: var(--cyan);
+}
+
+/* ── Chart wrapper ───────────────────────────────────────────────────────────── */
+.cv-chart-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Transparent overlay to block user interaction with the TradingView widget */
+.cv-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  cursor: default;
+  /* fully transparent — just blocks pointer events */
+}
+
+/* Loading state */
+.cv-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--bg-card);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.cv-loading-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--cyan);
+  animation: cvPulse 1s ease-in-out infinite;
+}
+
+/* ── Mobile ──────────────────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .chart-view  { height: 360px; }
+}
+
+@media (max-width: 768px) {
+  .chart-view  { height: 300px; }
+  .cv-updated  { display: none; }
+}
+
+@media (max-width: 480px) {
+  /* Aspect-ratio 16:9 on small phones */
+  .chart-view  { height: auto; aspect-ratio: 16 / 9; min-height: 220px; }
+  .cv-markets  { display: none; }
+  .cv-label    { font-size: 12px; }
+  .cv-fs-btn   { font-size: 13px; padding: 2px 7px; }
+}

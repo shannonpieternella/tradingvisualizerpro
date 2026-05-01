@@ -1,0 +1,2574 @@
+/**
+ * BLACKBULL Liquidity Execution Engine
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Signal sources: 90-min cycles | 6H cycles | Daily structure
+ * Execution: Phase 2 windows only
+ * Bias: Admin-controlled (BULLISH / BEARISH / AUTO)
+ * Auto mode: Order flow lock (H→L→H = BULLISH | L→H→L = BEARISH)
+ */
+
+import fetch from "node-fetch";
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
+import { MongoClient } from "mongodb";
+import { computeSweepSL, computeSweepTP, verifyOutcome } from "./lib-sl.mjs";
+import { notifySignal as cfNotifySignal, cancelSignal as cfCancelSignal } from "./copyfactory-bridge.js";
+
+const __dir = dirname(fileURLToPath(import.meta.url));
+
+// ── Config ────────────────────────────────────────────────────────────────────
+const envPath = join(__dir, "../.env");
+const env = {};
+try {
+  readFileSync(envPath, "utf8").split("\n").forEach(line => {
+    const [k, ...v] = line.split("=");
+    if (k?.trim() && v.length) env[k.trim()] = v.join("=").trim();
+  });
+} catch {}
+
+const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1490817002556755979/PNFk3zeUmTTTyYtKUzM1dyOrsgKMwR3J4o09aqz3-KoGCjxbdXShdq6fWV7LcW7qZWSt";
+const MCP_TOKEN       = process.env.MCP_TOKEN || env.MCP_TOKEN || "";
+const MCP_URL         = "https://178-104-80-233.sslip.io/mcp";
+const MONGO_URI       = process.env.MONGO_URI  || env.MONGO_URI  || "";
+
+// ── MongoDB singleton ─────────────────────────────────────────────────────────
+// Primary store for setup state (survives server reboots).
+// Falls back to local JSON files on connection failure — no single point of failure.
+let _mongoClient = null;
+let _mongoDB     = null;
+async function getDB() {
+  if (_mongoDB) return _mongoDB;
+  if (!MONGO_URI) return null;
+  try {
+    _mongoClient = new MongoClient(MONGO_URI, {
+      serverSelectionTimeoutMS: 3000,
+      connectTimeoutMS:         3000,
+      socketTimeoutMS:          5000,
+    });
+    await _mongoClient.connect();
+    _mongoDB = _mongoClient.db("tradingvisualizer");
+    console.log("[MongoDB] Connected");
+    return _mongoDB;
+  } catch (e) {
+    console.warn(`[MongoDB] Connect failed: ${e.message} — using local files`);
+    _mongoClient = null;
+    return null;
+  }
+}
+async function closeDB() {
+  if (_mongoClient) {
+    try { await _mongoClient.close(); } catch {}
+    _mongoClient = null; _mongoDB = null;
+  }
+}
+
+// ── Markets ───────────────────────────────────────────────────────────────────
+const MARKETS = {
+  NAS100: { tvSymbol: "CAPITALCOM:US100", priceMin: 10000, priceMax: 30000, label: "NAS100" },
+  US500:  { tvSymbol: "CAPITALCOM:US500", priceMin:  3000, priceMax: 12000, label: "US500"  },
+  US30:   { tvSymbol: "CAPITALCOM:US30",  priceMin: 20000, priceMax: 70000, label: "US30"   },
+  XAUUSD: { tvSymbol: "OANDA:XAUUSD",     priceMin:  1500, priceMax:  7000, label: "XAUUSD" },
+  GBPUSD: { tvSymbol: "OANDA:GBPUSD",     priceMin:   1.0, priceMax:   2.2, label: "GBPUSD" },
+  BTCUSD: { tvSymbol: "COINBASE:BTCUSD",  priceMin: 10000, priceMax: 200000, label: "BTCUSD" },
+  ETHUSD: { tvSymbol: "COINBASE:ETHUSD",  priceMin:   500, priceMax: 20000, label: "ETHUSD" },
+};
+const ACTIVE_MARKETS = ["NAS100", "US500", "US30", "XAUUSD", "GBPUSD", "BTCUSD", "ETHUSD"];
+const CRYPTO_MARKETS = new Set(["BTCUSD", "ETHUSD"]);
+
+// ── Phase 2 windows (minutes into trading day) ────────────────────────────────
+// Trading day starts 18:00 ET
+const PHASE2 = {
+  C1: { startMin:   90, endMin:  180, label: "19:30–21:00" },
+  C2: { startMin:  450, endMin:  540, label: "01:30–03:00" },
+  C3: { startMin:  810, endMin:  900, label: "07:30–09:00" },
+  C4: { startMin: 1170, endMin: 1260, label: "13:30–15:00" },
+};
+
+// 6H cycle boundaries (minutes into trading day)
+const SIX_H_BOUNDS = {
+  C1: { startMin:    0, endMin:  360, label: "18:00–00:00" },
+  C2: { startMin:  360, endMin:  720, label: "00:00–06:00" },
+  C3: { startMin:  720, endMin: 1080, label: "06:00–12:00" },
+  C4: { startMin: 1080, endMin: 1440, label: "12:00–18:00" },
+};
+
+// ── ET helpers ────────────────────────────────────────────────────────────────
+function tsToETHours(ts) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hourCycle: "h23",
+    hour: "2-digit", minute: "2-digit",
+  }).formatToParts(new Date(ts * 1000));
+  const h = parseInt(parts.find(p => p.type === "hour").value);
+  const m = parseInt(parts.find(p => p.type === "minute").value);
+  return h + m / 60;
+}
+
+// Parse a cycle label like "18:00-00:00", "06:00–12:00", or "Prev 12:00-18:00"
+// and return the timestamp (sec) of the cycle's END — the most recent occurrence
+// of that end-HH:MM at or before step2Ts. Used to constrain step-1 backscans to
+// candles that are genuinely POST-CYCLE.
+function findCycleEndTs(cycleLabel, step2Ts, candles) {
+  if (!cycleLabel || !step2Ts || !candles?.length) return null;
+  const m = cycleLabel
+    .replace(/^Prev\s+/, "")
+    .match(/(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const endHHMM = `${m[3].padStart(2, "0")}:${m[4]}`;
+  // Walk backwards through candles from step2Ts to find the most recent candle
+  // whose ET HH:MM matches the cycle's end time.
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hourCycle: "h23",
+    hour: "2-digit", minute: "2-digit",
+  });
+  for (let i = candles.length - 1; i >= 0; i--) {
+    const c = candles[i];
+    if (c.timestamp > step2Ts) continue;
+    if (fmt.format(new Date(c.timestamp * 1000)) === endHHMM) return c.timestamp;
+  }
+  return null;
+}
+
+function tsToETLabel(ts) {
+  return new Date(ts * 1000).toLocaleString("en-US", {
+    timeZone: "America/New_York", hourCycle: "h23",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function tsToETDateTime(ts) {
+  return new Date(ts * 1000).toLocaleString("en-US", {
+    timeZone: "America/New_York", hourCycle: "h23",
+    weekday: "short", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function tsToETDate(ts) {
+  return new Date(ts * 1000).toLocaleDateString("en-US", {
+    timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric",
+  });
+}
+
+function getTradingDayStartTs() {
+  const now  = new Date();
+  const etH  = tsToETHours(Date.now() / 1000);
+  const isDST = now.toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "short" }).includes("EDT");
+  const etOffsetH = isDST ? 4 : 5;
+
+  const etParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit",
+  }).formatToParts(now);
+  const y = parseInt(etParts.find(p => p.type === "year").value);
+  const mo = parseInt(etParts.find(p => p.type === "month").value);
+  const d  = parseInt(etParts.find(p => p.type === "day").value);
+
+  const target = new Date(Date.UTC(y, mo - 1, d));
+  if (etH < 18) target.setUTCDate(target.getUTCDate() - 1);
+
+  let t = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), target.getUTCDate(), 18 + etOffsetH, 0, 0));
+  // DST boundary fix
+  if (Math.abs(tsToETHours(t.getTime() / 1000) - 18) > 0.5) {
+    for (const adj of [-3600, 3600]) {
+      const t2 = new Date(t.getTime() + adj * 1000);
+      if (Math.abs(tsToETHours(t2.getTime() / 1000) - 18) < 0.1) { t = t2; break; }
+    }
+  }
+  return t.getTime() / 1000;
+}
+
+function minsIntoDay(ts, dayStartTs) {
+  return (ts - dayStartTs) / 60;
+}
+
+function get6HCycle(mins) {
+  if (mins < 0)    return null;
+  if (mins < 360)  return "C1";
+  if (mins < 720)  return "C2";
+  if (mins < 1080) return "C3";
+  if (mins < 1440) return "C4";
+  return null;
+}
+
+// Which Phase 2 window is currently active (or null)
+function getActivePhase2(dayStartTs) {
+  const nowTs = Date.now() / 1000;
+  for (const [cycle, p2] of Object.entries(PHASE2)) {
+    const startTs = dayStartTs + p2.startMin * 60;
+    const endTs   = dayStartTs + p2.endMin   * 60;
+    if (nowTs >= startTs && nowTs <= endTs)
+      return { cycle, ...p2, startTs, endTs };
+  }
+  return null;
+}
+
+// Next Phase 2 window. When all P2 windows in the current trading day have
+// passed (e.g. setup created at 16:15 ET, after C4 P2 ended at 15:00 and before
+// the next day's C1 P2 at 19:30), wrap to the next trading day's C1.
+function getNextPhase2(dayStartTs) {
+  const nowTs = Date.now() / 1000;
+  const buildEntries = (startTs) => Object.entries(PHASE2).map(([cycle, p2]) => ({
+    cycle, ...p2,
+    startTs: startTs + p2.startMin * 60,
+    endTs:   startTs + p2.endMin   * 60,
+  }));
+  const today = buildEntries(dayStartTs);
+  const next = today.find(p => p.startTs > nowTs);
+  if (next) return next;
+  return buildEntries(dayStartTs + 24 * 3600)[0];
+}
+
+// Phase 2 status for a given timestamp
+function getPhase2Status(dayStartTs) {
+  const p2 = getActivePhase2(dayStartTs);
+  const nowTs = Date.now() / 1000;
+  const mins = minsIntoDay(nowTs, dayStartTs);
+  const cycle = get6HCycle(mins) || "C4";
+  return {
+    inPhase2: !!p2,
+    activeP2: p2,
+    currentCycle: cycle,
+    phase: p2 ? 2 : 1,
+    minsIntoDay: mins,
+  };
+}
+
+// ── File helpers ──────────────────────────────────────────────────────────────
+function readJSON(path, fallback = null) {
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return fallback; }
+}
+function writeJSON(path, data) {
+  try { writeFileSync(path, JSON.stringify(data, null, 2)); } catch (e) {
+    console.error(`writeJSON(${path}): ${e.message}`);
+  }
+}
+
+// ── Admin Bias ────────────────────────────────────────────────────────────────
+const ADMIN_BIAS_FILE  = join(__dir, "admin_bias.json");
+const LOCK_CACHE_FILE  = join(__dir, "lock_cache.json");
+
+function loadLockCache() { return readJSON(LOCK_CACHE_FILE, {}); }
+function saveLockCache(market, lock) {
+  const cache = loadLockCache();
+  cache[market] = { ...lock, savedTs: Date.now() };
+  writeJSON(LOCK_CACHE_FILE, cache);
+}
+
+function readAdminBias(marketKey) {
+  const data = readJSON(ADMIN_BIAS_FILE, {});
+  // Market-specific override takes precedence over global
+  return data[marketKey] || data["GLOBAL"] || "AUTO";
+}
+
+function initAdminBias() {
+  if (!existsSync(ADMIN_BIAS_FILE)) {
+    writeJSON(ADMIN_BIAS_FILE, { GLOBAL: "AUTO" });
+  }
+}
+
+// ── Debug Log ─────────────────────────────────────────────────────────────────
+const DEBUG_LOG_FILE   = join(__dir, "debug_log.json");
+const SETUP_LOG_FILE   = join(__dir, "setup_log.json");
+const MAX_DEBUG_EVENTS = 500;
+
+function logEvent(market, event, details, state = null) {
+  const nowTs = Date.now() / 1000;
+  const entry = {
+    time: tsToETLabel(nowTs),
+    ts: Date.now(),
+    market,
+    event,
+    details,
+    ...(state ? { state } : {}),
+  };
+  console.log(`[${entry.time} ET] | ${market.padEnd(6)} | ${event.padEnd(30)} | ${details}`);
+  const log = readJSON(DEBUG_LOG_FILE, []);
+  log.unshift(entry);
+  if (log.length > MAX_DEBUG_EVENTS) log.length = MAX_DEBUG_EVENTS;
+  writeJSON(DEBUG_LOG_FILE, log);
+}
+
+// Mirror a single setup_log entry to MongoDB `setup_history` so we get durable,
+// queryable history across reboots + weeks/months of data. Local JSON remains
+// the instant fallback. Fire-and-forget: never block monitor flow on Mongo.
+async function mirrorSetupHistory(entry) {
+  if (!entry?.id) return;
+  try {
+    const db = await getDB();
+    if (!db) return;
+    await db.collection("setup_history").replaceOne(
+      { _id: entry.id },
+      { _id: entry.id, ...entry, updatedAt: new Date() },
+      { upsert: true }
+    );
+  } catch (e) { console.warn(`[MongoDB] mirrorSetupHistory: ${e.message}`); }
+}
+
+function patchSetupLog(id, patch) {
+  if (!id) return;
+  const log = readJSON(SETUP_LOG_FILE, []);
+  const item = log.find(e => e.id === id);
+  if (!item) return;
+  Object.assign(item, patch);
+  writeJSON(SETUP_LOG_FILE, log);
+  mirrorSetupHistory(item); // fire-and-forget
+}
+
+function updateSetupLogOutcome(id, outcome, extra = {}) {
+  patchSetupLog(id, {
+    outcome,
+    outcomeTime: tsToETDateTime(Date.now() / 1000),
+    status:      outcome === "WIN" ? "CLOSED_TP2" : outcome === "LOSS" ? "CLOSED_SL" : "CLOSED",
+    ...extra,
+  });
+}
+
+// Reconcile: make sure the CLOSED state of an active setup is reflected in the
+// canonical setup_log + Mongo. Protects against any edge where the outcome
+// handler didn't fire or an older setup_log entry was mis-attributed.
+// Match STRICT: id only. Loose fallbacks caused cross-market corruption when
+// active_setup files occasionally got wrong data — a WIN on NAS100 wrongly
+// propagated to a BTCUSD entry in the log. ID match is the only safe path.
+// Process orphaned setup_log entries for a market — catches setups that are
+// not in the active-slot file (e.g. when a 6H setup shares a market with a
+// newer 90M that took the active slot). Without this, the orphan sits in
+// WAITING_PHASE2 / ACTIVE forever even after the entry window passed and SL/TP
+// printed in the candles.
+//
+// Two orphan paths:
+//   1. WAITING_PHASE2 with passed entry-window → trigger entry from +15min
+//      candle open, recompute SL via canonical formula, mark ACTIVE, then
+//      verify outcome.
+//   2. ACTIVE → run verifyOutcome to detect SL/TP hits.
+function verifyOrphanedActives(marketKey, candles, currentActiveId = null) {
+  if (!candles?.length) return;
+  const log = readJSON(SETUP_LOG_FILE, []);
+  let dirty = false;
+  for (const item of log) {
+    if (item.market !== marketKey) continue;
+    if (currentActiveId && item.id === currentActiveId) continue;  // handled by reconcileActiveSetup
+    if (item.status !== "ACTIVE" && item.status !== "WAITING_PHASE2") continue;
+
+    // ── (1) WAITING_PHASE2 → trigger entry retroactively if window passed ──
+    if (item.status === "WAITING_PHASE2") {
+      // Need entryWindowTs (entry candle ts) + step2Ts to construct a valid trigger.
+      if (!item.entryWindowTs || !item.step2Ts) continue;
+      const entryCandleTs = item.entryWindowTs;
+      const entryCandle = candles.find(c => c.timestamp === entryCandleTs);
+      if (!entryCandle) continue;                                   // window not yet reached
+      const dec = entryCandle.open > 100 ? 1 : 5;
+      const actualEntry = +entryCandle.open.toFixed(dec);
+      const slPrice = computeSweepSL({
+        direction:  item.direction,
+        candles,
+        step2Ts:    item.step2Ts,
+        entryTs:    entryCandle.timestamp,
+        entryPrice: actualEntry,
+        sweepPrice: item.sweepPrice,
+      });
+      const { tp1, tp2 } = computeSweepTP(item.direction, actualEntry, slPrice);
+      item.entry     = actualEntry;
+      item.sl        = slPrice;
+      item.tp1       = tp1;
+      item.tp2       = tp2;
+      item.entryTime = tsToETLabel(entryCandle.timestamp);
+      item.entryTs   = entryCandle.timestamp * 1000;
+      item.status    = "ACTIVE";
+      item.tp1Hit    = false;
+      item.tp2Hit    = false;
+      item.slHit     = false;
+      console.log(`[${marketKey}] ORPHAN TRIGGER: ${item.id} → ACTIVE entry=${actualEntry} sl=${slPrice} tp1=${tp1}`);
+      dirty = true;
+      // fall through to outcome-verify below with the freshly-set fields
+    }
+
+    // ── (2) ACTIVE → verify SL/TP outcome against post-entry candles ──
+    if (!item.entryTs || item.sl == null || item.tp1 == null) continue;
+    const entryTsSec = item.entryTs > 1e12 ? item.entryTs / 1000 : item.entryTs;
+    const result = verifyOutcome({
+      direction: item.direction,
+      candles,
+      entryTs:   entryTsSec,
+      entry:     item.entry,
+      sl:        item.sl,
+      tp1:       item.tp1,
+      tp2:       item.tp2,
+    });
+    if (!result.outcome) {
+      if (dirty) mirrorSetupHistory(item);  // still open; mirror the trigger update
+      continue;
+    }
+
+    if (result.outcome === "LOSS") {
+      item.status      = "CLOSED_SL";
+      item.outcome     = "LOSS";
+      item.slHit       = true;
+      item.outcomeTime = item.outcomeTime ?? tsToETDateTime(result.hitTs);
+      item.outcomePrice = item.outcomePrice ?? result.hitPrice;
+    } else if (result.outcome === "WIN") {
+      item.status      = "CLOSED_TP2";
+      item.outcome     = "WIN";
+      item.tp1Hit      = true;
+      item.tp2Hit      = result.rMulti === 2;
+      item.outcomeTime = item.outcomeTime ?? tsToETDateTime(result.hitTs);
+      item.outcomePrice = item.outcomePrice ?? result.hitPrice;
+    }
+    console.log(`[${marketKey}] ORPHAN VERIFY: ${item.id} → ${item.status} (${item.outcome})`);
+    mirrorSetupHistory(item);
+    cfCancelSignal(item, "all").catch(() => {});
+    dirty = true;
+  }
+  if (dirty) writeJSON(SETUP_LOG_FILE, log);
+}
+
+function reconcileActiveSetup(activeSetup) {
+  if (!activeSetup) return;
+  const { status } = activeSetup;
+  if (status !== "CLOSED_TP2" && status !== "CLOSED_SL" && status !== "ACTIVE" && status !== "WAITING_PHASE2") return;
+
+  const outcome = status === "CLOSED_TP2" ? "WIN"
+                : status === "CLOSED_SL"  ? "LOSS"
+                : null;
+
+  const log = readJSON(SETUP_LOG_FILE, []);
+  if (!activeSetup.id) return;                      // no id → nothing to reconcile safely
+  const match = log.find(e => e.id === activeSetup.id);
+  if (!match) return;                                // unknown setup → don't touch log
+  if (match.market !== activeSetup.market) return;   // guard against cross-market IDs
+
+  const patch = {
+    status,
+    sl:        activeSetup.sl,
+    tp1:       activeSetup.tp1,
+    tp2:       activeSetup.tp2,
+    entry:     activeSetup.entry,
+    entryTime: activeSetup.entryTime ?? match?.entryTime ?? null,
+    entryTs:   activeSetup.entryTs   ?? match?.entryTs   ?? null,
+    entryWindowTime: activeSetup.entryWindowTime ?? match?.entryWindowTime ?? null,
+    entryWindowTs:   activeSetup.entryWindowTs   ?? match?.entryWindowTs   ?? null,
+    tp1Hit:    !!activeSetup.tp1Hit,
+  };
+  if (outcome) {
+    patch.outcome     = outcome;
+    patch.outcomeTime = match?.outcomeTime ?? tsToETDateTime(Date.now() / 1000);
+  }
+
+  if (match) {
+    // Only write if something actually changed — avoid unnecessary Mongo writes.
+    const changed = Object.entries(patch).some(([k, v]) => match[k] !== v);
+    if (changed) {
+      Object.assign(match, patch);
+      if (!match.id) match.id = activeSetup.id ?? `${activeSetup.market}-${activeSetup.source ?? activeSetup.tf}-${activeSetup.createdTs}`;
+      writeJSON(SETUP_LOG_FILE, log);
+      mirrorSetupHistory(match);
+    }
+  } else if (outcome) {
+    // No matching log entry and we have an outcome — insert one so the trade
+    // still shows up in the journal.
+    const id = activeSetup.id ?? `${activeSetup.market}-${activeSetup.source ?? activeSetup.tf}-${activeSetup.createdTs ?? Date.now()}`;
+    const entry = {
+      id,
+      market:     activeSetup.market,
+      direction:  activeSetup.direction,
+      source:     activeSetup.source ?? activeSetup.tf,
+      tf:         activeSetup.tf,
+      side:       activeSetup.direction === "BUY" ? "LOW" : "HIGH",
+      bslLevel:   activeSetup.bslLevel,
+      sslLevel:   activeSetup.sslLevel,
+      entry:      activeSetup.entry,
+      sweepPrice: activeSetup.sweepPrice,
+      step1Time:  activeSetup.step1Time,
+      step2Time:  activeSetup.step2Time,
+      cycleLabel: activeSetup.cycleLabel,
+      ...patch,
+      ts:         activeSetup.createdTs ?? Date.now(),
+      datetime:   tsToETDateTime((activeSetup.createdTs ?? Date.now()) / 1000),
+    };
+    log.unshift(entry);
+    writeJSON(SETUP_LOG_FILE, log.slice(0, 10000));
+    mirrorSetupHistory(entry);
+  }
+}
+
+// ── Order Flow Lock ───────────────────────────────────────────────────────────
+// Lock = BSL swept → SSL swept → BSL swept again (BULLISH)  or reverse (BEARISH)
+// Each day's type is derived from whether future candles swept that day's level:
+//   HIGH = buyside (BSL) swept later  |  LOW = sellside (SSL) swept later
+//   BOTH = both sides swept           |  RANGE = neither (skip)
+//
+// Robustness:
+//   - Non-overlapping matches only (each day used once per pattern family)
+//   - Staleness: patterns ending > 14 days ago are discarded entirely
+//   - Decay: patterns ending > 7 days ago count half
+//   - Invalidation: 3+ consecutive moves against the lock → strength -= 2
+//   - Direction: whichever family has the most recent pattern wins
+//   - keyDates: accumulate all unique dates from all counted patterns
+const LOCK_STALENESS_EXPIRE = 14;  // days → lock discarded (anything older than this = forget it)
+const LOCK_STALENESS_DECAY  = 7;   // days → strength halved (still shown, but flagged as decayed)
+const LOCK_MAX_STRENGTH     = 6;
+
+// Validate the lock pattern's three sweeps happen in chronological order:
+//   t1Hit (step-1 BSL hit) < t2Sweep (step-2 SSL grab) < t3Hit (step-3 BSL hit)
+// for bullish; mirrored for bearish. Each step is a HIGH-type / LOW-type day,
+// meaning its OWN level was later swept by some future candle. Step 3's high
+// does NOT need to reclaim step-1's level — any new BSL after the SSL grab
+// counts as a continuation BOS.
+function validateBOS(m1, m2, m3, isBullish) {
+  const t1 = isBullish ? m1.hitHigh?.ts : m1.hitLow?.ts;
+  const t2 = isBullish ? m2.hitLow?.ts  : m2.hitHigh?.ts;
+  const t3 = isBullish ? m3.hitHigh?.ts : m3.hitLow?.ts;
+  if (!t1 || !t2 || !t3) return null;
+  if (!(t1 < t2 && t2 < t3)) return null;
+  return { t1, t2, t3 };
+}
+
+function findLockPatterns(sig, isBullish, candles) {
+  const patterns = [];
+  const aType = isBullish ? "HIGH" : "LOW";
+  const bType = isBullish ? "LOW"  : "HIGH";
+  let i = 0;
+  while (i < sig.length - 2) {
+    const a = sig[i];
+    if (a.type !== aType && a.type !== "BOTH") { i++; continue; }
+    let matched = false;
+    for (let j = i + 1; j < sig.length; j++) {
+      if (sig[j].type === bType || sig[j].type === "BOTH") {
+        for (let k = j + 1; k < sig.length; k++) {
+          if (sig[k].type === aType || sig[k].type === "BOTH") {
+            // No level constraint: step-3's BSL/SSL doesn't need to reclaim step-1.
+            // Any "BSL → SSL → BSL" sequence (or mirror for bearish) with the three
+            // sweeps in chronological order is a valid lock.
+            const bos = validateBOS(a, sig[j], sig[k], isBullish);
+            if (bos) {
+              patterns.push({
+                dates: [a.date, sig[j].date, sig[k].date],
+                moves: [a, sig[j], sig[k]],
+                bos,
+                endIdx: k,
+              });
+              i = k; // non-overlapping: next search starts from the matched end
+              matched = true;
+            }
+            break;
+          }
+          if (sig[k].type === bType) break;
+        }
+        break;
+      }
+      if (sig[j].type === aType) break;
+    }
+    if (!matched) i++;
+  }
+  return patterns;
+}
+
+function detectOrderFlowLock(moves, candles = null, opts = {}) {
+  // dailyMode: when true, BOS-candle timestamps are D-candles (24h aligned to UTC
+  // for crypto / 17:00 ET open for futures) and should be displayed as ET close-dates
+  // (ts + 86400 → ET date) — same convention as buildDailyLockMoves uses for step 1/2.
+  // false = candles are intraday (15-min/6H), label with raw ET date+time.
+  const { dailyMode = false } = opts;
+  const sig = moves.filter(m => m.type !== "RANGE");
+  if (sig.length < 3) return null;
+
+  const bullish = findLockPatterns(sig, true,  candles);
+  const bearish = findLockPatterns(sig, false, candles);
+
+  if (!bullish.length && !bearish.length) return null;
+
+  // Direction: whichever family has the most recent match wins (fresh structure > stale count)
+  const latestBull = bullish[bullish.length - 1];
+  const latestBear = bearish[bearish.length - 1];
+  const bullRecent = latestBull?.endIdx ?? -1;
+  const bearRecent = latestBear?.endIdx ?? -1;
+
+  const isBull = bullRecent >= bearRecent;
+  const matches = isBull ? bullish : bearish;
+  const direction = isBull ? "BULLISH" : "BEARISH";
+  const lastMatch = matches[matches.length - 1];
+
+  // Staleness: how many "signal days" since the last pattern closed?
+  const daysSince = (sig.length - 1) - lastMatch.endIdx;
+  if (daysSince > LOCK_STALENESS_EXPIRE) return null;
+
+  // Base strength = count of non-overlapping patterns, capped
+  let strength = Math.min(LOCK_MAX_STRENGTH, matches.length);
+
+  // Decay: halve strength for patterns > 7 days old
+  if (daysSince > LOCK_STALENESS_DECAY) {
+    strength = Math.max(1, Math.floor(strength / 2));
+  }
+
+  // Invalidation: moves AFTER the last pattern that go against the lock
+  const after = sig.slice(lastMatch.endIdx + 1);
+  const againstType = isBull ? "LOW" : "HIGH";
+  const against = after.filter(m => m.type === againstType).length;
+  if (against >= 3) strength = Math.max(1, strength - 2);
+
+  const last = sig[sig.length - 1];
+  const opportunity =
+    isBull  && (last.type === "LOW"  || last.type === "BOTH") ? "BUY"  :
+    !isBull && (last.type === "HIGH" || last.type === "BOTH") ? "SELL" : null;
+
+  const noteVerb = isBull ? "BSL" : "SSL";
+  const middle   = isBull ? "pullback" : "bounce";
+  const lockNote = `${noteVerb}(${lastMatch.dates[0]}) → ${middle}(${lastMatch.dates[1]}) → ${noteVerb}(${lastMatch.dates[2]}) → ${direction}`
+    + (daysSince > LOCK_STALENESS_DECAY ? ` · ${daysSince}d old (decayed)` : "")
+    + (against >= 3 ? ` · ${against} moves against (weakened)` : "");
+
+  // Accumulate all unique key dates from every counted pattern of this direction
+  const allDates = [];
+  for (const m of matches) {
+    for (const d of m.dates) if (!allDates.includes(d)) allDates.push(d);
+  }
+
+  // Build structured per-step info for the most recent pattern.
+  // Step roles per direction:
+  //   BULLISH: BSL formed → SSL grabbed → new BSL formed (each gets later swept)
+  //   BEARISH: SSL formed → BSL grabbed → new SSL formed
+  const [m1, m2, m3] = lastMatch.moves;
+  const sweepKey1 = isBull ? "hitHigh" : "hitLow";
+  const sweepKey2 = isBull ? "hitLow"  : "hitHigh";
+  const sweepKey3 = isBull ? "hitHigh" : "hitLow";
+  const levelKey1 = isBull ? "high"    : "low";
+  const levelKey2 = isBull ? "low"     : "high";
+  const levelKey3 = isBull ? "high"    : "low";
+
+  const steps = [
+    {
+      step:    1,
+      role:    isBull ? "BSL_FORMED"      : "SSL_FORMED",
+      label:   isBull ? "BSL ligt op"     : "SSL ligt op",
+      date:    m1.date,
+      cycle:   m1.cycle ?? null,
+      cycleLabel: m1.cycleLabel ?? null,
+      level:   m1[levelKey1],
+      sweptAt: m1[sweepKey1] ?? null,
+    },
+    {
+      step:    2,
+      role:    isBull ? "SSL_GRAB"        : "BSL_GRAB",
+      label:   isBull ? "SSL ligt op (liquidity grab onder)"
+                      : "BSL ligt op (liquidity grab boven)",
+      date:    m2.date,
+      cycle:   m2.cycle ?? null,
+      cycleLabel: m2.cycleLabel ?? null,
+      level:   m2[levelKey2],
+      sweptAt: m2[sweepKey2] ?? null,
+    },
+    {
+      step:    3,
+      role:    isBull ? "BSL_RECLAIM_BOS" : "SSL_RECLAIM_BOS",
+      label:   isBull ? "Nieuwe BSL — bullish BOS bevestigd"
+                      : "Nieuwe SSL — bearish BOS bevestigd",
+      date:    m3.date,
+      cycle:   m3.cycle ?? null,
+      cycleLabel: m3.cycleLabel ?? null,
+      level:   m3[levelKey3],
+      // Step-3's own level was later swept too — that's the BOS continuation
+      sweptAt: m3[sweepKey3] ?? null,
+      bosAt:   m3[sweepKey3] ?? null,        // alias for UI compatibility
+      bosBaseLevel: m3[levelKey3],
+    },
+  ];
+
+  return {
+    direction,
+    strength,
+    opportunity,
+    note:          lockNote,
+    keyDates:      allDates,
+    matchCount:    matches.length,
+    daysSinceLast: daysSince,
+    movesAgainst:  against,
+    steps,
+  };
+}
+
+// ── 6H Historical Structure (for 6H lock detection) ──────────────────────────
+// Builds 6H cycles across the last N trading days and classifies each cycle
+// as HIGH/LOW/BOTH/RANGE based on whether later cycles swept its levels.
+// Returns moves compatible with detectOrderFlowLock.
+function build6HHistoricalMoves(candles, numDays = 14) {
+  const nowTs = Date.now() / 1000;
+  const lookbackSecs = numDays * 86400;
+  const relevant = candles.filter(c => c.timestamp >= nowTs - lookbackSecs);
+  if (!relevant.length) return [];
+
+  // Group candles into 6H buckets per trading day
+  const buckets = new Map();
+  for (const c of relevant) {
+    // Find this candle's trading day start (18:00 ET boundary)
+    const etH = tsToETHours(c.timestamp);
+    const approxDayStart = etH >= 18
+      ? c.timestamp - (etH - 18) * 3600
+      : c.timestamp - (etH + 6) * 3600;
+    const dayStart = Math.round(approxDayStart / 3600) * 3600;
+    const minsIn = (c.timestamp - dayStart) / 60;
+    if (minsIn < 0 || minsIn >= 1440) continue;
+    const cycle = minsIn < 360 ? "C1" : minsIn < 720 ? "C2" : minsIn < 1080 ? "C3" : "C4";
+    const startOffset = { C1: 0, C2: 360, C3: 720, C4: 1080 }[cycle];
+    const key = `${dayStart}-${cycle}`;
+    if (!buckets.has(key)) {
+      buckets.set(key, {
+        ts:       dayStart + startOffset * 60,
+        cycle,
+        dayStart,
+        high:     c.high,
+        low:      c.low,
+      });
+    } else {
+      const b = buckets.get(key);
+      if (c.high > b.high) b.high = c.high;
+      if (c.low  < b.low)  b.low  = c.low;
+    }
+  }
+
+  // Sort chronologically. Drop the current in-progress cycle (no future candles yet).
+  const cycleEnd = (b) => b.ts + 6 * 3600;
+  const all = [...buckets.values()]
+    .sort((a, b) => a.ts - b.ts)
+    .filter(b => cycleEnd(b) <= nowTs); // only completed cycles
+
+  // Classify: for each cycle, did any LATER cycle sweep its high/low?
+  const sortedCandles = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+  const moves = [];
+  for (let i = 0; i < all.length; i++) {
+    const b = all[i];
+    const endTs = cycleEnd(b);
+    let hitHigh = null, hitLow = null;
+    // Walk forward through later candles; capture the first sweep candle for each side
+    for (const c of sortedCandles) {
+      if (c.timestamp <= endTs) continue;
+      if (!hitHigh && c.high >= b.high) {
+        hitHigh = { price: c.high, date: tsToETDate(c.timestamp), time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      }
+      if (!hitLow && c.low <= b.low) {
+        hitLow  = { price: c.low,  date: tsToETDate(c.timestamp), time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      }
+      if (hitHigh && hitLow) break;
+    }
+    const type = hitHigh && hitLow ? "BOTH" : hitHigh ? "HIGH" : hitLow ? "LOW" : "RANGE";
+    const dateLabel = tsToETDate(b.ts);
+    moves.push({
+      type, high: b.high, low: b.low,
+      date: `${dateLabel} ${b.cycle}`,
+      cycle: b.cycle,
+      cycleDate: dateLabel,
+      cycleLabel: SIX_H_BOUNDS[b.cycle]?.label ?? null,
+      hitHigh, hitLow,
+    });
+  }
+  return moves;
+}
+
+// ── Order Flow Bias (daily × 6H confluence) ───────────────────────────────────
+// Combines the daily and 6H locks into a single robust bias state.
+// Lets the admin override via readAdminBias — this only fires when bias = AUTO.
+//
+// States:
+//   STRONG_BULL / STRONG_BEAR  — daily + 6H agree, respected structure
+//   BULL / BEAR                — agree but one side weakened/stale
+//   BULL_pullback / BEAR_bounce — daily one way, 6H opposite (correction inside trend)
+//   BULL_emerging / BEAR_emerging — daily NEUTRAL, 6H showing direction (early move)
+//   NEUTRAL                    — no reliable bias
+function computeOrderFlowBias(dailyLock, sixHLock) {
+  const d = dailyLock?.direction ?? null;
+  const s = sixHLock?.direction  ?? null;
+
+  let state = "NEUTRAL";
+  let direction = null;
+  let score = 0;
+
+  // Both agree → strong signal
+  if (d && s && d === s) {
+    direction = d === "BULLISH" ? "BUY" : "SELL";
+    const sum = (dailyLock.strength ?? 0) + (sixHLock.strength ?? 0);
+    if (sum >= 6) state = `STRONG_${d}`;
+    else           state = d;
+    score = 50 + Math.min(50, sum * 5); // 50-100
+  }
+  // Daily has direction, 6H disagrees → pullback in ongoing trend
+  else if (d && s && d !== s) {
+    direction = d === "BULLISH" ? "BUY" : "SELL"; // keep daily bias, but weak
+    state = d === "BULLISH" ? "BULL_pullback" : "BEAR_bounce";
+    score = 30 + (dailyLock.strength ?? 0) * 5;
+  }
+  // Daily neutral, 6H directional → emerging trend
+  else if (!d && s) {
+    direction = s === "BULLISH" ? "BUY" : "SELL";
+    state = s === "BULLISH" ? "BULL_emerging" : "BEAR_emerging";
+    score = 20 + (sixHLock.strength ?? 0) * 5;
+  }
+  // Daily only (no 6H)
+  else if (d && !s) {
+    direction = d === "BULLISH" ? "BUY" : "SELL";
+    state = `${d}_weak`;
+    score = 20 + (dailyLock.strength ?? 0) * 3;
+  }
+
+  // Structure respected check — is the pullback low of the last pattern still intact?
+  // If not, reduce score (potential BOS).
+  const dailyResp = dailyLock?.daysSinceLast != null && (dailyLock.movesAgainst ?? 0) < 3;
+  const sixHResp  = sixHLock?.daysSinceLast != null && (sixHLock.movesAgainst ?? 0) < 3;
+  if (direction && !dailyResp && !sixHResp) score = Math.max(10, score - 20);
+
+  return {
+    state,
+    direction,         // "BUY" | "SELL" | null
+    score: Math.min(100, Math.max(0, Math.round(score))),
+    dailyDirection: d,
+    sixHDirection:  s,
+    dailyRespected: dailyResp,
+    sixHRespected:  sixHResp,
+    note: buildBiasNote(d, s, state),
+  };
+}
+
+function buildBiasNote(d, s, state) {
+  if (state === "NEUTRAL") return "No clear bias — daily and 6H don't align";
+  if (state.includes("STRONG"))   return `Daily ${d} + 6H ${s} — strong confluence`;
+  if (state.includes("pullback")) return `Daily ${d} in control, 6H showing pullback`;
+  if (state.includes("bounce"))   return `Daily ${d} in control, 6H showing bounce`;
+  if (state.includes("emerging")) return `6H flipping to ${s} — possible trend change`;
+  if (state.includes("weak"))     return `Daily ${d} alone, 6H not confirming`;
+  return state;
+}
+
+// ── 90-Min Cycle Builder ──────────────────────────────────────────────────────
+function build90MinCycles(candles, dayStartTs) {
+  const nowTs = Date.now() / 1000;
+  const cycles = {};
+
+  // Include 3 cycles before the session start so recently-completed cycles
+  // (e.g. 16:30–18:00 just before rollover) remain visible with hit detection.
+  const PREV_CYCLES = 3;
+  const todayCandles = candles.filter(c => {
+    const m = minsIntoDay(c.timestamp, dayStartTs);
+    return m >= -(PREV_CYCLES * 90) && m < 1440;
+  });
+
+  for (const c of todayCandles) {
+    const m   = minsIntoDay(c.timestamp, dayStartTs);
+    const idx = Math.floor(m / 90);
+    if (!cycles[idx]) {
+      const startTs = dayStartTs + idx * 90 * 60;
+      const endTs   = startTs + 90 * 60;
+      cycles[idx] = {
+        index: idx, startTs, endTs,
+        startTime: tsToETLabel(startTs),
+        endTime:   tsToETLabel(endTs),
+        complete:  endTs <= nowTs,
+        high: -Infinity, highTs: null,
+        low:   Infinity, lowTs:  null,
+        candleCount: 0,
+        hitHigh: null, hitLow: null,
+      };
+    }
+    const cyc = cycles[idx];
+    cyc.candleCount++;
+    if (c.high > cyc.high) { cyc.high = c.high; cyc.highTs = c.timestamp; }
+    if (c.low  < cyc.low)  { cyc.low  = c.low;  cyc.lowTs  = c.timestamp; }
+  }
+
+  // Clean up Infinity values
+  for (const cyc of Object.values(cycles)) {
+    if (cyc.high === -Infinity) cyc.high = null;
+    if (cyc.low  ===  Infinity) cyc.low  = null;
+    if (cyc.high) cyc.highTime = tsToETLabel(cyc.highTs);
+    if (cyc.low)  cyc.lowTime  = tsToETLabel(cyc.lowTs);
+  }
+
+  // Hit detection for complete cycles
+  const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+  for (const cyc of Object.values(cycles)) {
+    if (!cyc.complete || !cyc.high) continue;
+    for (const c of sorted.filter(c => c.timestamp >= cyc.endTs)) {
+      if (!cyc.hitHigh && c.high >= cyc.high)
+        cyc.hitHigh = { price: c.high, time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      if (!cyc.hitLow && c.low <= cyc.low)
+        cyc.hitLow  = { price: c.low,  time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      if (cyc.hitHigh && cyc.hitLow) break;
+    }
+  }
+
+  return cycles;
+}
+
+// ── 6H Cycle Builder ──────────────────────────────────────────────────────────
+function build6HCycles(candles, dayStartTs) {
+  const nowTs = Date.now() / 1000;
+  const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+
+  // Also include previous day's C4 as prevC4
+  const prevC4StartTs = dayStartTs - 6 * 3600;
+  let prevC4Candles = candles.filter(c => c.timestamp >= prevC4StartTs && c.timestamp < dayStartTs);
+  if (!prevC4Candles.length) {
+    // Look back up to 4 days (weekends/gaps)
+    for (let d = 2; d <= 4; d++) {
+      const s = dayStartTs - d * 24 * 3600 - 6 * 3600;
+      const e = s + 6 * 3600;
+      const found = candles.filter(c => c.timestamp >= s && c.timestamp < e);
+      if (found.length) { prevC4Candles = found; break; }
+    }
+  }
+
+  const cycles = {};
+
+  // Build prevC4
+  if (prevC4Candles.length) {
+    const high = Math.max(...prevC4Candles.map(c => c.high));
+    const low  = Math.min(...prevC4Candles.map(c => c.low));
+    const prevC4End = dayStartTs;
+    const afterPrevC4 = sorted.filter(c => c.timestamp >= prevC4End);
+    let hitHigh = null, hitLow = null;
+    for (const c of afterPrevC4) {
+      if (!hitHigh && c.high >= high) hitHigh = { price: c.high, time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      if (!hitLow  && c.low  <= low)  hitLow  = { price: c.low,  time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      if (hitHigh && hitLow) break;
+    }
+    cycles["prevC4"] = { name: "prevC4", label: "Prev 12:00–18:00", status: "complete", high, low, hitHigh, hitLow };
+  }
+
+  // Build current day cycles
+  for (const [name, bounds] of Object.entries(SIX_H_BOUNDS)) {
+    const startTs = dayStartTs + bounds.startMin * 60;
+    const endTs   = dayStartTs + bounds.endMin   * 60;
+    const cc      = candles.filter(c => c.timestamp >= startTs && c.timestamp < endTs);
+    if (!cc.length) {
+      cycles[name] = { name, label: bounds.label, status: "no_data", high: null, low: null, hitHigh: null, hitLow: null };
+      continue;
+    }
+    const high = Math.max(...cc.map(c => c.high));
+    const low  = Math.min(...cc.map(c => c.low));
+    const isActive = endTs > nowTs;
+    const hitHigh_c = { _found: false, val: null };
+    const hitLow_c  = { _found: false, val: null };
+
+    if (!isActive) {
+      for (const c of sorted.filter(c => c.timestamp >= endTs)) {
+        if (!hitHigh_c._found && c.high >= high) { hitHigh_c.val = { price: c.high, time: tsToETLabel(c.timestamp), ts: c.timestamp }; hitHigh_c._found = true; }
+        if (!hitLow_c._found  && c.low  <= low)  { hitLow_c.val  = { price: c.low,  time: tsToETLabel(c.timestamp), ts: c.timestamp }; hitLow_c._found  = true; }
+        if (hitHigh_c._found && hitLow_c._found) break;
+      }
+    }
+
+    cycles[name] = {
+      name, label: bounds.label,
+      status: isActive ? "active" : "complete",
+      high, low,
+      hitHigh: hitHigh_c.val,
+      hitLow:  hitLow_c.val,
+    };
+  }
+
+  return cycles;
+}
+
+// ── Daily Structure Builder (18:00-session ET) ────────────────────────────────
+// Groups 15-min candles by the 18:00 ET trading-day boundary.
+// Label is derived from midnight (6h after session start), matching the
+// convention used in buildDailyLockMoves (D-candle label = close date).
+function buildDailyStructure(candles) {
+  const dayMap = new Map();
+  for (const c of candles) {
+    const etH = tsToETHours(c.timestamp);
+    const approxDayStart = etH >= 18
+      ? c.timestamp - (etH - 18) * 3600
+      : c.timestamp - (etH + 6) * 3600;
+    const key = Math.round(approxDayStart / 3600) * 3600;
+
+    if (!dayMap.has(key)) {
+      dayMap.set(key, { startTs: key, high: -Infinity, low: Infinity, candles: [] });
+    }
+    const day = dayMap.get(key);
+    day.candles.push(c);
+    if (c.high > day.high) day.high = c.high;
+    if (c.low  < day.low)  day.low  = c.low;
+  }
+
+  const days = [...dayMap.values()]
+    .filter(d => d.high !== -Infinity && d.low !== Infinity)
+    .sort((a, b) => a.startTs - b.startTs);
+
+  const allSorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+  for (const day of days) {
+    day.hitHigh = null;
+    day.hitLow  = null;
+    const endTs = day.startTs + 24 * 3600;
+    const after = allSorted.filter(c => c.timestamp >= endTs);
+    for (const c of after) {
+      if (!day.hitHigh && c.high >= day.high) day.hitHigh = { price: c.high, date: tsToETDate(c.timestamp), time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      if (!day.hitLow  && c.low  <= day.low)  day.hitLow  = { price: c.low,  date: tsToETDate(c.timestamp), time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      if (day.hitHigh && day.hitLow) break;
+    }
+    // Label from midnight (6h after 18:00 session start) = same convention as D-candle labels
+    day.date    = tsToETDate(day.startTs + 6 * 3600);
+    day.isToday = Math.abs(day.startTs - getTradingDayStartTs()) < 7200;
+    if (day.high === -Infinity) day.high = null;
+    if (day.low  ===  Infinity) day.low  = null;
+  }
+
+  return days.slice(-30);   // enough history for the 14-day lock lookback + spike capture
+}
+
+// ── Reference Cycle Helpers (mirrors LiveSignals.jsx logic) ──────────────────
+
+// 90min: scan all completed cycles (most recent first), pick the most actionable one.
+// A sweep from cycle N can be completed by candles in cycle N+2 or later.
+function getRef90MinCycle(cycles90, dir) {
+  const arr = Object.values(cycles90).filter(c => c.high != null && c.low != null)
+    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  if (!arr.length) return null;
+  const completed = [...arr].filter(c => c.complete).reverse(); // most recent first
+  if (completed.length) {
+    const best = findBestCandleRef(completed, dir);
+    if (best) return best;
+  }
+  // Fallback: clock-based previous period
+  const etNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const etMin = etNow.getHours() * 60 + etNow.getMinutes();
+  const fromBase = (etMin - 18 * 60 + 1440) % 1440;
+  const prevPeriod = Math.floor(fromBase / 90) - 1;
+  const prevStartMin = ((18 * 60 + prevPeriod * 90) % 1440 + 1440) % 1440;
+  const prevStartStr = `${String(Math.floor(prevStartMin / 60)).padStart(2, "0")}:${String(prevStartMin % 60).padStart(2, "0")}`;
+  return arr.find(c => c.startTime === prevStartStr)
+    ?? arr.filter(c => c.complete).pop()
+    ?? arr[arr.length - 1];
+}
+
+// 6H: scan all completed cycles (most recent first), pick the most actionable one.
+function getRef6HCycle(cycles6H, dir) {
+  const entries = Object.entries(cycles6H);
+  // entries are in insertion order: prevC4, C1, C2, C3, C4 — reverse = most recent first
+  const completed = [...entries]
+    .filter(([, c]) => c.status === "complete" && c.high != null)
+    .reverse()
+    .map(([name, c]) => ({ name, ...c }));
+  if (!completed.length) return null;
+  if (!dir) return completed[0];
+
+  const isBuy     = dir === "BUY";
+  const mostRecent = completed[0];
+
+  // Find any cycle where step-1 is already done (SSL for SELL, BSL for BUY)
+  const step1Cycle = completed.find(c =>
+    isBuy ? c.hitHigh != null : c.hitLow != null
+  );
+
+  if (step1Cycle && step1Cycle.name !== mostRecent.name) {
+    // Cross-cycle ref: step-1 hit comes from whichever cycle it happened,
+    // step-2 target uses the most recent cycle's levels (nearest price).
+    return {
+      name:    mostRecent.name,
+      label:   mostRecent.label ?? mostRecent.name,
+      high:    isBuy ? step1Cycle.high  : mostRecent.high,
+      low:     isBuy ? mostRecent.low   : step1Cycle.low,
+      hitHigh: isBuy ? step1Cycle.hitHigh : mostRecent.hitHigh,
+      hitLow:  isBuy ? mostRecent.hitLow  : step1Cycle.hitLow,
+    };
+  }
+
+  return findBestCandleRef(completed.slice(0, 2), dir) ?? completed[0];
+}
+
+// Returns the best ref from a most-recent-first candidates list.
+// Priority:
+//   1. Most recent where step-1 done but step-2 NOT yet (in-progress — most actionable)
+//   2. Most recent where both done in correct order, within first 3 candidates (fresh complete)
+//   3. Most recent (watching — waiting for step-1)
+function findBestCandleRef(candidates, dir) {
+  if (!candidates.length) return null;
+  if (!dir) return candidates[0];
+  const isBuy = dir === "BUY";
+  // In-progress: step-1 done, step-2 not yet
+  const inProgress = candidates.find(c => {
+    const step1 = isBuy ? c.hitHigh != null : c.hitLow != null;
+    const step2 = isBuy ? c.hitLow  != null : c.hitHigh != null;
+    return step1 && !step2;
+  });
+  if (inProgress) return inProgress;
+  // Fresh complete setup (both swept in correct order) — only within 3 most recent
+  const freshComplete = candidates.slice(0, 3).find(c => {
+    if (!c.hitHigh || !c.hitLow) return false;
+    return isBuy ? (c.hitHigh.ts ?? 0) < (c.hitLow.ts ?? 0)
+                 : (c.hitLow.ts  ?? 0) < (c.hitHigh.ts ?? 0);
+  });
+  if (freshComplete) return freshComplete;
+  // Fallback: most recent (watching for step-1)
+  return candidates[0];
+}
+
+// Daily: most relevant recent trading day for the given direction.
+// Looks back up to 14 days — sweep pattern can span non-consecutive days.
+function getRefDailyDay(dailyDays, allowedDirection) {
+  const etNow = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const todayStr = etNow.toLocaleDateString("en-US", {
+    timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric",
+  });
+  const candidates = [...dailyDays].reverse()
+    .filter(d => d.date !== todayStr && d.high != null)
+    .slice(0, 14); // 14-day lookback
+  if (!candidates.length) return null;
+  return findBestCandleRef(candidates, allowedDirection) ?? candidates[0];
+}
+
+// ── Card Signal Detector ──────────────────────────────────────────────────────
+// Fires events for the REFERENCE cycle only (same cycle the UI cards show).
+// Returns { events, newState } — only fires when allowedDirection is set.
+function detectCardSignals(cycles90, cycles6H, dailyDays, allowedDirection, prevState) {
+  const events  = [];
+  const newState = JSON.parse(JSON.stringify(prevState));
+
+  const refs = {
+    "90min": getRef90MinCycle(cycles90, allowedDirection),
+    "6H":    getRef6HCycle(cycles6H, allowedDirection),
+    "daily": getRefDailyDay(dailyDays, allowedDirection),
+  };
+
+  // Sweeps older than 30 min are pre-marked as alerted when we switch to a new ref.
+  // This prevents re-firing Discord alerts for historical sweeps found via the extended lookback.
+  const RECENT_TS = Date.now() / 1000 - 30 * 60;
+
+  for (const [tf, ref] of Object.entries(refs)) {
+    if (!ref || !allowedDirection) continue;
+
+    const cycleKey   = tf === "90min" ? ref.startTime : tf === "6H" ? ref.name : ref.date;
+    const cycleLabel = tf === "90min" ? `${ref.startTime}–${ref.endTime ?? "now"}`
+                     : tf === "6H"   ? (ref.label ?? ref.name)
+                     :                 ref.date;
+
+    // Reset state when reference cycle changes — suppress alerts for already-old sweeps
+    if (!newState[tf] || newState[tf].cycleKey !== cycleKey) {
+      newState[tf] = {
+        cycleKey,
+        highSent: ref.hitHigh ? ref.hitHigh.ts < RECENT_TS : false,
+        lowSent:  ref.hitLow  ? ref.hitLow.ts  < RECENT_TS : false,
+      };
+    }
+    const st    = newState[tf];
+    const isBuy = allowedDirection === "BUY";
+
+    // For BUY: HIGH = step 1, LOW = step 2. For SELL: LOW = step 1, HIGH = step 2.
+    if (ref.hitHigh && !st.highSent) {
+      events.push({ tf, step: isBuy ? 1 : 2, side: "HIGH", ref, cycleKey, cycleLabel, direction: allowedDirection });
+      newState[tf].highSent = true;
+    }
+    if (ref.hitLow && !st.lowSent) {
+      events.push({ tf, step: isBuy ? 2 : 1, side: "LOW", ref, cycleKey, cycleLabel, direction: allowedDirection });
+      newState[tf].lowSent = true;
+    }
+  }
+
+  return { events, newState };
+}
+
+// SL calculation is centralized in lib-sl.mjs. Legacy shim kept for the few
+// old call sites that pass only (direction, candles, entry, sweepPrice).
+function calcSL(direction, candles, entryPrice, sweepPrice) {
+  return computeSweepSL({ direction, candles, step2Ts: null, entryTs: null, entryPrice, sweepPrice });
+}
+
+// ── TP Calculator (1:2 and 1:3 RR) ───────────────────────────────────────────
+function calcTP(direction, entry, sl) {
+  const risk = Math.abs(entry - sl);
+  if (direction === "BUY") {
+    return {
+      tp1: +(entry + 2 * risk).toFixed(entry > 100 ? 1 : 5),
+      tp2: +(entry + 3 * risk).toFixed(entry > 100 ? 1 : 5),
+    };
+  } else {
+    return {
+      tp1: +(entry - 2 * risk).toFixed(entry > 100 ? 1 : 5),
+      tp2: +(entry - 3 * risk).toFixed(entry > 100 ? 1 : 5),
+    };
+  }
+}
+
+// ── Setup State ───────────────────────────────────────────────────────────────
+// MongoDB is primary (survives reboots). Local JSON file is always written too
+// as an instant fallback when MongoDB is unavailable.
+function setupFilePath(marketKey) {
+  return join(__dir, `setup_${marketKey}.json`);
+}
+
+async function loadSetup(marketKey) {
+  const db = await getDB();
+  if (db) {
+    try {
+      const doc = await db.collection("active_setups").findOne({ _id: marketKey });
+      if (doc) {
+        const { _id, ...setup } = doc;
+        return setup;
+      }
+      // Not in MongoDB yet — load from local file and sync immediately
+      const local = readJSON(setupFilePath(marketKey), null);
+      if (local) {
+        await db.collection("active_setups").replaceOne(
+          { _id: marketKey }, { _id: marketKey, ...local }, { upsert: true }
+        );
+        console.log(`[MongoDB] Synced ${marketKey} setup to MongoDB`);
+      }
+      return local;
+    } catch (e) { console.warn(`[MongoDB] loadSetup: ${e.message}`); }
+  }
+  return readJSON(setupFilePath(marketKey), null);
+}
+
+async function saveSetup(marketKey, setup) {
+  writeJSON(setupFilePath(marketKey), setup);
+  const db = await getDB();
+  if (db) {
+    try {
+      await db.collection("active_setups").replaceOne(
+        { _id: marketKey },
+        { _id: marketKey, ...setup },
+        { upsert: true }
+      );
+    } catch (e) { console.warn(`[MongoDB] saveSetup: ${e.message}`); }
+  }
+}
+
+async function clearSetup(marketKey, setup = null, reason = null) {
+  try { unlinkSync(setupFilePath(marketKey)); } catch {}
+  const db = await getDB();
+  if (db) {
+    try { await db.collection("active_setups").deleteOne({ _id: marketKey }); }
+    catch (e) { console.warn(`[MongoDB] clearSetup: ${e.message}`); }
+  }
+  // Mark the corresponding setup_log entry CANCELLED so the dashboard stops
+  // showing it as in-progress. Only touch entries still WAITING_PHASE2/ACTIVE
+  // — never overwrite a settled CLOSED_SL/CLOSED_TP2 outcome.
+  if (setup?.id) {
+    const log = readJSON(SETUP_LOG_FILE, []);
+    const item = log.find(e => e.id === setup.id);
+    if (item && (item.status === "WAITING_PHASE2" || item.status === "ACTIVE")) {
+      patchSetupLog(setup.id, {
+        status:        "CANCELLED",
+        outcome:       null,
+        cancelledTime: tsToETDateTime(Date.now() / 1000),
+        cancelReason:  reason || "cleared",
+      });
+    }
+  }
+}
+
+// Verify the stored setup status against actual candle data.
+// Catches cases where the JSON state drifted from reality (e.g. CLOSED_SL when SL
+// was never actually hit, or ACTIVE when SL clearly printed in the candles).
+function verifySetupAgainstCandles(setup, candles, marketKey) {
+  if (!setup || !setup.entryTs || setup.sl == null) return setup;
+  const entryTs  = setup.entryTs / 1000;
+  const postEntry = candles.filter(c => c.timestamp >= entryTs);
+  if (!postEntry.length) return setup;
+
+  const isBuy = setup.direction === "BUY";
+  const slPrinted = isBuy
+    ? postEntry.some(c => c.low  <= setup.sl)
+    : postEntry.some(c => c.high >= setup.sl);
+
+  if (setup.status === "ACTIVE" && slPrinted && !setup.slHit) {
+    console.log(`[${marketKey}] VERIFY: SL in candles but setup says ACTIVE — correcting → CLOSED_SL`);
+    return { ...setup, slHit: true, status: "CLOSED_SL" };
+  }
+  if (setup.status === "CLOSED_SL" && !slPrinted) {
+    console.log(`[${marketKey}] VERIFY: SL NOT in candles but setup says CLOSED_SL — correcting → ACTIVE`);
+    return { ...setup, slHit: false, status: "ACTIVE" };
+  }
+  return setup;
+}
+
+// Card signal state (which reference-cycle sweeps have been notified)
+function cardStateFile(marketKey)   { return join(__dir, `card_state_${marketKey}.json`); }
+function loadCardState(marketKey)   { return readJSON(cardStateFile(marketKey), {}); }
+function saveCardState(marketKey, state) { writeJSON(cardStateFile(marketKey), state); }
+
+// ── Weekly Recap ──────────────────────────────────────────────────────────────
+const WEEKLY_RECAP_FILE = join(__dir, "weekly_recap.json");
+
+function getWeekKey() {
+  const now = new Date();
+  const etParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit", weekday: "short",
+  }).formatToParts(now);
+  const g = t => etParts.find(p => p.type === t)?.value;
+  // Get Monday of current week
+  const wd = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 }[g("weekday")] ?? 0;
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - wd);
+  return monday.toISOString().split("T")[0];
+}
+
+function getDayKey() {
+  const nowTs = getTradingDayStartTs();
+  return tsToETDate(nowTs + 6 * 3600); // label from midday of the trading day
+}
+
+function updateWeeklyRecap(marketKey, event) {
+  const recap = readJSON(WEEKLY_RECAP_FILE, {});
+  const weekKey = getWeekKey();
+  const dayKey  = getDayKey();
+
+  if (!recap[weekKey]) recap[weekKey] = {};
+  if (!recap[weekKey][marketKey]) recap[weekKey][marketKey] = {};
+  if (!recap[weekKey][marketKey][dayKey]) {
+    recap[weekKey][marketKey][dayKey] = {
+      date: dayKey,
+      sweeps: [],
+      setups: [],
+      trades: { wins: 0, losses: 0, open: 0 },
+      bias: readAdminBias(marketKey),
+      lockState: null,
+    };
+  }
+
+  const day = recap[weekKey][marketKey][dayKey];
+
+  if (event.type === "sweep")       day.sweeps.push({ source: event.source, side: event.side, level: event.level, time: event.time });
+  if (event.type === "setup")       day.setups.push({ direction: event.direction, source: event.source, entry: event.entry, time: event.time });
+  if (event.type === "trade_win")   { day.trades.wins++;   if (day.trades.open > 0) day.trades.open--; }
+  if (event.type === "trade_loss")  { day.trades.losses++; if (day.trades.open > 0) day.trades.open--; }
+  if (event.type === "trade_open")  day.trades.open++;
+  if (event.type === "lock_update") day.lockState = event.lockState;
+
+  writeJSON(WEEKLY_RECAP_FILE, recap);
+}
+
+// ── Discord ───────────────────────────────────────────────────────────────────
+
+const DASHBOARD_URL = "http://178.104.80.233:8082/dashboard";
+
+function _fp(p) {
+  if (p == null) return "—";
+  if (p > 1000) return p.toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return p.toFixed(5);
+}
+
+// Minimal notifications — no signal data, just alert + link to dashboard.
+// Users klikken naar de dashboard om details te zien (privacy + traffic naar app).
+async function _sendNotify(title, url = DASHBOARD_URL) {
+  const content = `${title}\n→ ${url}`;
+  try {
+    await fetch(DISCORD_WEBHOOK, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+  } catch (e) {
+    console.error(`[DISCORD] Failed: ${e.message}`);
+  }
+}
+
+async function sendDiscordStep1(market, tf /*, ...unused*/) {
+  // Subtle heads-up — step 1 only. No levels, no times.
+  await _sendNotify(`🔵 **${market}** · ${tf} — stap 1 compleet, wacht op stap 2`);
+  console.log(`[DISCORD] Step-1 notify sent: ${market} ${tf}`);
+}
+
+async function sendDiscordSetup(setup) {
+  // Setup created — user opens dashboard for full details.
+  await _sendNotify(`🟢 **${setup.market}** · ${setup.tf} — nieuwe setup ✓ — open dashboard voor details`);
+  console.log(`[DISCORD] Setup notify sent: ${setup.market} ${setup.tf}`);
+}
+
+async function sendDiscordTradeEvent(marketKey, event /*, details*/) {
+  const emoji = event === "SL_HIT" ? "🔴" : event === "TP1_HIT" ? "🎯" : event === "TP2_HIT" ? "🏆" : "📊";
+  const label = event === "ENTRY_TRIGGERED" ? "entry gevuld"
+              : event === "SL_HIT"          ? "SL geraakt"
+              : event === "TP1_HIT"         ? "TP1 geraakt"
+              : event === "TP2_HIT"         ? "TP2 geraakt"
+              : event;
+  await _sendNotify(`${emoji} **${marketKey}** — ${label}`);
+}
+
+async function sendDiscordEntryWindow(setup /*, windowLabel*/) {
+  // Entry window opened — user opens dashboard to see price/SL/TP.
+  await _sendNotify(`⏰ **${setup.market}** · ${setup.tf} — entry window open nu`);
+  console.log(`[DISCORD] Entry window notify sent: ${setup.market} ${setup.tf}`);
+}
+
+// ── Market Data Writer ────────────────────────────────────────────────────────
+function writeMarketData(marketKey, data) {
+  const file = join(__dir, `market_data_${marketKey}.json`);
+  writeJSON(file, { ...data, timestamp: Date.now() });
+}
+
+// ── MCP Caller ───────────────────────────────────────────────────────────────
+let _mcpSession = null;
+async function mcpCall(method, params = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/event-stream",
+    ...(MCP_TOKEN ? { Authorization: `Bearer ${MCP_TOKEN}` } : {}),
+  };
+  if (!_mcpSession) {
+    const r = await fetch(MCP_URL, {
+      method: "POST", headers,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { protocolVersion: "2024-11-05", capabilities: {},
+                  clientInfo: { name: "monitor", version: "3.0" } } }),
+    });
+    _mcpSession = r.headers.get("mcp-session-id");
+  }
+  const res = await fetch(MCP_URL, {
+    method: "POST",
+    headers: { ...headers, "mcp-session-id": _mcpSession },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method, params }),
+  });
+  const text = await res.text();
+  for (const line of text.split("\n")) {
+    const l = line.startsWith("data:") ? line.slice(5).trim() : line.trim();
+    if (!l) continue;
+    try {
+      const d = JSON.parse(l);
+      if (d.result !== undefined) return d.result;
+      if (d.error) throw new Error(d.error.message);
+    } catch (e) { if (e.message && !e.message.includes("JSON")) throw e; }
+  }
+  return null;
+}
+
+async function switchToMarket(marketKey, retries = 5) {
+  const market = MARKETS[marketKey];
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      if (attempt > 1) { _mcpSession = null; }
+      await mcpCall("tools/call", { name: "change_symbol", arguments: { symbol: market.tvSymbol } });
+      await new Promise(r => setTimeout(r, 4000));
+      await mcpCall("tools/call", { name: "change_timeframe", arguments: { timeframe: "15" } });
+      await new Promise(r => setTimeout(r, 2500));
+      let raw = null;
+      for (let dr = 0; dr < 3; dr++) {
+        const result = await mcpCall("tools/call", { name: "get_bar_data", arguments: { count: 5 } });
+        raw = result?.content?.[0]?.text;
+        if (raw) break;
+        await new Promise(r => setTimeout(r, 3000));
+      }
+      if (!raw) throw new Error("No data after switch");
+      const testCandles = JSON.parse(raw);
+      if (!Array.isArray(testCandles) || !testCandles.length) throw new Error("Empty candles");
+      const price = testCandles[testCandles.length - 1].close;
+      if (price < market.priceMin || price > market.priceMax)
+        throw new Error(`Price ${price} out of range [${market.priceMin}–${market.priceMax}]`);
+      console.log(`[${marketKey}] ✅ Switched. Price: ${price}`);
+      return true;
+    } catch (err) {
+      console.warn(`[${marketKey}] Switch attempt ${attempt} failed: ${err.message}`);
+      if (attempt < retries) await new Promise(r => setTimeout(r, 4000 * attempt));
+    }
+  }
+  _mcpSession = null;
+  return false;
+}
+
+async function fetchDailyCandles(marketKey, count = 20) {
+  const { tvSymbol, priceMin, priceMax } = MARKETS[marketKey];
+
+  // Switch to D TF, then re-confirm the symbol to ensure correct data
+  await mcpCall("tools/call", { name: "change_timeframe", arguments: { timeframe: "D" } });
+  await new Promise(r => setTimeout(r, 3000));
+  await mcpCall("tools/call", { name: "change_symbol", arguments: { symbol: tvSymbol } });
+  await new Promise(r => setTimeout(r, 4000));
+
+  let dailyCandles = [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await mcpCall("tools/call", { name: "get_bar_data", arguments: { count } });
+    const raw = result?.content?.[0]?.text;
+    if (raw) {
+      const candles = JSON.parse(raw);
+      if (Array.isArray(candles) && candles.length >= 2) {
+        const gap   = candles[candles.length - 1].timestamp - candles[candles.length - 2].timestamp;
+        const price = candles[candles.length - 1].close;
+        if (gap > 3600 * 12 && price >= priceMin && price <= priceMax) {
+          dailyCandles = candles;
+          break;
+        }
+      }
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+
+  // Always switch back to 15min with symbol confirmed
+  await mcpCall("tools/call", { name: "change_timeframe", arguments: { timeframe: "15" } });
+  await new Promise(r => setTimeout(r, 2000));
+  await mcpCall("tools/call", { name: "change_symbol", arguments: { symbol: tvSymbol } });
+  await new Promise(r => setTimeout(r, 3000));
+
+  return dailyCandles;
+}
+
+function buildDailyLockMoves(dailyCandles) {
+  // For each day: was BSL (high) or SSL (low) swept by any later day's candle?
+  // Returns moves[] for lock detection AND dailyLevels[] for dashboard display
+  const moves = [];
+  const levels = [];
+
+  // Use actual current ET calendar date — not array position — to mark today correctly.
+  // Array-position isToday was wrong before regular-session open (last D-candle = yesterday).
+  const etTodayStr = new Date().toLocaleDateString("en-US", {
+    timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric",
+  });
+
+  for (let i = 0; i < dailyCandles.length; i++) {
+    const d = dailyCandles[i];
+    // TradingView D-candle timestamp = session OPEN (17:00 ET). The user sees the candle
+    // labeled by its CLOSE date (next calendar day). Add 86400s to get the close date.
+    const date = new Date((d.timestamp + 86400) * 1000).toLocaleDateString("en-US", {
+      timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric",
+    });
+    const isToday = date === etTodayStr;
+    let hitHigh = null, hitLow = null;
+
+    if (!isToday) {
+      for (let j = i + 1; j < dailyCandles.length; j++) {
+        if (!hitHigh && dailyCandles[j].high >= d.high) {
+          // +86400 to get close date (matches user's chart label for the sweeping session)
+          const sweepDate = new Date((dailyCandles[j].timestamp + 86400) * 1000).toLocaleDateString("en-US", {
+            timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric",
+          });
+          hitHigh = { price: dailyCandles[j].high, date: sweepDate, time: null, ts: dailyCandles[j].timestamp };
+        }
+        if (!hitLow && dailyCandles[j].low <= d.low) {
+          const sweepDate = new Date((dailyCandles[j].timestamp + 86400) * 1000).toLocaleDateString("en-US", {
+            timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric",
+          });
+          hitLow = { price: dailyCandles[j].low, date: sweepDate, time: null, ts: dailyCandles[j].timestamp };
+        }
+        if (hitHigh && hitLow) break;
+      }
+    }
+
+    const type = hitHigh && hitLow ? "BOTH" : hitHigh ? "HIGH" : hitLow ? "LOW" : "RANGE";
+    moves.push({ type, high: d.high, low: d.low, date, hitHigh, hitLow });
+    levels.push({ date, high: d.high, low: d.low, hitHigh, hitLow, isToday });
+  }
+
+  return { moves: moves.slice(0, -1), levels }; // exclude today from moves (not yet confirmed)
+}
+
+// Force TV to load more historical bars into the chart's _series. Without this
+// step `bars()` only returns whatever's in the default visible window (~300-500
+// bars), which on 15m TF caps history at ~5 days — too short for the 14-day
+// daily-lock lookback. setVisibleRange does NOT trigger backfill; only wheel
+// events on the canvas do. Each `scroll_chart` left dispatches a wheel event
+// that TV interprets as "load older bars". Empirically: 8 × 500-bar scrolls
+// loads ~12-13 days of 15m history. After loading, we snap the timescale back
+// to the present so the visible chart still shows live data.
+async function loadCandleHistory(scrollSteps = 10) {
+  try {
+    for (let i = 0; i < scrollSteps; i++) {
+      await mcpCall("tools/call", { name: "scroll_chart", arguments: { direction: "left", bars: 500 } });
+      await new Promise(r => setTimeout(r, 800));
+    }
+    // Snap back to present so live updates resume
+    const snap = `(function(){try{window.TradingViewApi._activeChartWidgetWV._value.executeActionById('timeScaleReset');return 'ok';}catch(e){return 'err:'+e.message;}})()`;
+    await mcpCall("tools/call", { name: "execute_javascript", arguments: { code: snap } });
+    await new Promise(r => setTimeout(r, 1500));
+  } catch (e) { console.warn(`loadCandleHistory failed: ${e.message}`); }
+}
+
+async function fetchCandles(count = 2000, opts = {}) {
+  const { loadHistory = false, scrollSteps = 10 } = opts;
+  if (loadHistory) {
+    await loadCandleHistory(scrollSteps);
+  }
+  const result = await mcpCall("tools/call", { name: "get_bar_data", arguments: { count } });
+  const raw    = result?.content?.[0]?.text;
+  if (!raw) throw new Error("No candle data from MCP");
+  const candles = JSON.parse(raw);
+  if (!Array.isArray(candles) || !candles.length) throw new Error("Empty candle array");
+  const lastTs  = candles[candles.length - 1].timestamp;
+  const diffMin = (Date.now() - lastTs * 1000) / 60000;
+  if (diffMin > 20) {
+    console.warn(`Candles stale: ${diffMin.toFixed(1)} min old`);
+    await mcpCall("tools/call", { name: "execute_javascript", arguments: {
+      code: `try { document.querySelector('canvas.chart-gui-wrapper')?.dispatchEvent(new KeyboardEvent('keydown',{key:'End',bubbles:true})); } catch(e){} return 'refresh';`
+    }});
+    await new Promise(r => setTimeout(r, 2500));
+    const r2  = await mcpCall("tools/call", { name: "get_bar_data", arguments: { count } });
+    const raw2 = r2?.content?.[0]?.text;
+    if (raw2) {
+      const c2 = JSON.parse(raw2);
+      if (Array.isArray(c2) && c2.length) return { candles: c2, staleWarning: true, diffMin };
+    }
+  }
+  return { candles, staleWarning: diffMin > 20, diffMin };
+}
+
+// Candle cache: load from disk, fetch only the recent delta via CDP, merge.
+// A full fetch (2000 candles) only happens when cache is missing or stale (>2h).
+// Normal case: fetch 25 candles (~6h at 15min) and merge — much faster + less CDP load.
+// Strip contaminated candles whose price is wildly off from the rest. Happens
+// when symbol-switch silently fails and we read bars from another market —
+// values land in our cache and corrupt subsequent analysis. Two-stage filter:
+//   1. Hard bounds: reject anything outside MARKETS[mk].priceMin/priceMax
+//   2. Median-relative: reject candles whose close is < 0.5× or > 2× the
+//      median close of all surviving candles (catches contamination that fits
+//      within priceMin/priceMax but is anomalous for the actual market).
+function sanitizeCandles(candles, marketKey) {
+  if (!candles?.length) return candles;
+  const { priceMin, priceMax } = MARKETS[marketKey] || {};
+  if (priceMin == null) return candles;
+
+  const inBounds = candles.filter(c =>
+    Number.isFinite(c.close) && c.close >= priceMin && c.close <= priceMax &&
+    Number.isFinite(c.high)  && Number.isFinite(c.low)  && c.high >= c.low
+  );
+  if (inBounds.length < 5) return inBounds;
+
+  const sorted = [...inBounds].map(c => c.close).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+
+  const clean = inBounds.filter(c =>
+    c.close >= median * 0.5 && c.close <= median * 2.0 &&
+    c.high  >= median * 0.5 && c.low   <= median * 2.0
+  );
+
+  const dropped = candles.length - clean.length;
+  if (dropped > 0) {
+    console.log(`[${marketKey}] sanitizeCandles: dropped ${dropped} contaminated bars (median=${median.toFixed(2)})`);
+  }
+  return clean;
+}
+
+async function fetchCandlesWithCache(marketKey) {
+  const cacheFile = join(__dir, `candles_${marketKey}.json`);
+
+  let cached = [];
+  try { cached = JSON.parse(readFileSync(cacheFile, "utf8")); } catch {}
+  // Drop any historical contamination before merging
+  cached = sanitizeCandles(cached, marketKey);
+
+  const lastCachedTs = cached.length ? cached[cached.length - 1].timestamp : 0;
+  const cacheAgeMin  = (Date.now() / 1000 - lastCachedTs) / 60;
+
+  // Use cache if it has enough history and is less than 2 hours old
+  const useCache = cached.length >= 200 && cacheAgeMin < 120;
+  const fetchCount = useCache ? 25 : 2000;
+
+  console.log(`[${marketKey}] Candle cache: ${cached.length} bars, ${cacheAgeMin.toFixed(0)} min old → fetching ${fetchCount}`);
+
+  // Cold-start: scroll chart back 10× 500 bars (~12-13 days of 15m) to force TV
+  // to load enough history. Otherwise bars() returns only the default ~300-500.
+  const result = await fetchCandles(fetchCount, useCache ? {} : { loadHistory: true, scrollSteps: 10 });
+  // Sanitize the fresh fetch too — switchToMarket only validates the LAST candle.
+  result.candles = sanitizeCandles(result.candles, marketKey);
+
+  if (useCache) {
+    // Merge: cache provides history, fresh candles update/extend the tip.
+    // Use timestamp as key so duplicate candles (current open bar) get overwritten.
+    const byTs = new Map(cached.map(c => [c.timestamp, c]));
+    for (const c of result.candles) byTs.set(c.timestamp, c);
+    result.candles = [...byTs.values()].sort((a, b) => a.timestamp - b.timestamp);
+    console.log(`[${marketKey}] Merged → ${result.candles.length} bars total`);
+  }
+
+  return result;
+}
+
+function isMarketOpen(marketKey) {
+  if (CRYPTO_MARKETS.has(marketKey)) return true;
+  const etH = tsToETHours(Date.now() / 1000);
+  const now = new Date();
+  const wd  = parseInt(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "narrow" })
+    .format(now) === "S" ? (now.toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short" }) === "Sat" ? 6 : 0) : 1);
+  const etWd = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].indexOf(
+    new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" }).format(now)
+  );
+  if (etWd === 0) return false; // Sunday
+  if (etWd === 6) return false; // Saturday
+  if (etWd === 5 && etH >= 17) return false; // Friday after 17:00
+  return true;
+}
+
+// ── Core Market Analysis ──────────────────────────────────────────────────────
+async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLockLevels = null) {
+  const tag = `[${marketKey}]`;
+  const dayStartTs = getTradingDayStartTs();
+  const phaseInfo  = getPhase2Status(dayStartTs);
+  const adminBias  = readAdminBias(marketKey);
+
+  // Build structures
+  const cycles90  = build90MinCycles(candles, dayStartTs);
+  const cycles6H  = build6HCycles(candles, dayStartTs);
+  // 18:00 ET session grouping — labels match D-candle convention (close date)
+  const dailyDays = buildDailyStructure(candles);
+
+  // Order flow lock — ALWAYS derived from buildDailyStructure on the in-memory
+  // 15-min candles. Trading day = 18:00 ET → 18:00 ET (matches the 6H cycles
+  // and Phase-2 windows used elsewhere in this engine). The D-TF path was
+  // dropped because TV's "D" candles for crypto on Coinbase are UTC-aligned
+  // (00:00 UTC → 00:00 UTC) and produce off-by-day labels for users on ET.
+  const prevDays = dailyDays.filter(d => !d.isToday && d.high && d.low);
+  const dailyLockMoves = prevDays.map(d => ({
+    type: (d.hitHigh && d.hitLow) ? "BOTH"
+        : d.hitHigh               ? "HIGH"
+        : d.hitLow                ? "LOW"
+        :                           "RANGE",
+    high: d.high, low: d.low, date: d.date,
+    hitHigh: d.hitHigh, hitLow: d.hitLow,
+  }));
+  const lockState = detectOrderFlowLock(dailyLockMoves, candles);
+  // Levels for the dashboard daily card — derive from same 18:00-ET aggregation
+  if (!dailyLockLevels || !dailyLockLevels.length) {
+    dailyLockLevels = dailyDays.slice(-10).map(d => ({
+      date: d.date, high: d.high, low: d.low,
+      hitHigh: d.hitHigh, hitLow: d.hitLow, isToday: !!d.isToday,
+    }));
+  }
+
+  // Supplement D-TF dailyLevels with real-time 15-min sweep detection.
+  // The D candle for "yesterday" may not yet have a next D candle (e.g. early morning
+  // before regular session opens). Use 15-min candles from the current session to fill
+  // in hitHigh/hitLow that D-candle comparison alone cannot detect yet.
+  if (dailyLockLevels && dailyLockLevels.length) {
+    const sorted15m = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+    const etTodayStr = new Date().toLocaleDateString("en-US", {
+      timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric",
+    });
+    // Use date-string comparison (isToday in cache may be stale from old code)
+    const latestNonToday = [...dailyLockLevels].reverse()
+      .find(lev => lev.date !== etTodayStr && lev.high);
+    if (latestNonToday && (!latestNonToday.hitHigh || !latestNonToday.hitLow)) {
+      // Candles from this session onward (session started at 18:00 ET, D session ended at 17:00 ET —
+      // 1h overlap is acceptable; the relevant sweeps happen well within the session)
+      const sessionStart = getTradingDayStartTs();
+      for (const c of sorted15m.filter(c => c.timestamp >= sessionStart)) {
+        if (!latestNonToday.hitHigh && c.high >= latestNonToday.high)
+          latestNonToday.hitHigh = { price: c.high, time: tsToETLabel(c.timestamp), ts: c.timestamp };
+        if (!latestNonToday.hitLow && c.low <= latestNonToday.low)
+          latestNonToday.hitLow = { price: c.low, time: tsToETLabel(c.timestamp), ts: c.timestamp };
+        if (latestNonToday.hitHigh && latestNonToday.hitLow) break;
+      }
+    }
+  }
+
+  // ── 6H Lock (tactical bias) ─────────────────────────────────────────────
+  // Applies the same H→L→H / L→H→L lock detection on 6H cycles from the last
+  // 14 days. Combined with the daily lock via confluence scoring.
+  const sixHMoves = build6HHistoricalMoves(candles, 14);
+  const sixHLockState = detectOrderFlowLock(sixHMoves, candles);
+
+  // ── Order Flow Bias (daily × 6H confluence) ─────────────────────────────
+  // Only used when adminBias === "AUTO". Manual BULLISH/BEARISH overrides still win.
+  const orderFlowBias = computeOrderFlowBias(lockState, sixHLockState);
+
+  // Determine allowed direction.
+  // Manual override (BULLISH/BEARISH) always wins. AUTO uses the daily×6H confluence
+  // bias (orderFlowBias.direction) — only trades when bias is clear.
+  let allowedDirection = null; // null = both allowed
+  if (adminBias === "BULLISH") {
+    allowedDirection = "BUY";
+  } else if (adminBias === "BEARISH") {
+    allowedDirection = "SELL";
+  } else if (adminBias === "AUTO") {
+    // Use confluence bias first; fall back to raw daily lock if confluence is NEUTRAL
+    if (orderFlowBias.direction) {
+      allowedDirection = orderFlowBias.direction;
+    } else if (lockState) {
+      allowedDirection = lockState.direction === "BULLISH" ? "BUY" : "SELL";
+    }
+  }
+
+  logEvent(marketKey, "STRUCTURE_BUILT",
+    `90M: ${Object.keys(cycles90).length} cycles | Daily: ${dailyDays.length} days | Bias: ${adminBias} | ` +
+    `D-Lock: ${lockState?.direction ?? "—"}×${lockState?.strength ?? 0} | ` +
+    `6H-Lock: ${sixHLockState?.direction ?? "—"}×${sixHLockState?.strength ?? 0} | ` +
+    `Flow: ${orderFlowBias.state} (${orderFlowBias.score})`);
+
+  // Update lock in weekly recap
+  if (lockState) {
+    updateWeeklyRecap(marketKey, { type: "lock_update", lockState: lockState.direction });
+  }
+
+  // ── Card signal detection (reference cycle per timeframe) ────────────────
+  const prevCardState = loadCardState(marketKey);
+  const { events: cardEvents, newState: updatedCardState } = detectCardSignals(
+    cycles90, cycles6H, dailyDays, allowedDirection, prevCardState
+  );
+  saveCardState(marketKey, updatedCardState);
+
+  for (const ev of cardEvents) {
+    logEvent(marketKey, `CARD_SWEEP_${ev.step}`, `${ev.tf} ${ev.side} step${ev.step} [${ev.cycleLabel}]`, "sweep");
+    updateWeeklyRecap(marketKey, { type: "sweep", source: ev.tf, side: ev.side, level: ev.side === "HIGH" ? ev.ref.high : ev.ref.low, time: ev.side === "HIGH" ? ev.ref.hitHigh?.time : ev.ref.hitLow?.time });
+  }
+
+  // ── Signal validation & setup creation ───────────────────────────────────
+  const currentPrice = candles[candles.length - 1]?.close ?? 0;
+  const currentTime  = tsToETLabel(candles[candles.length - 1]?.timestamp ?? Date.now() / 1000);
+  let activeSetup = await loadSetup(marketKey);
+
+  // Validate and auto-correct setup state against actual candles
+  if (activeSetup) {
+    activeSetup = verifySetupAgainstCandles(activeSetup, candles, marketKey);
+
+    // ── Robust field repair — runs every tick so ALL setups (new + old) end up
+    // with a complete step-1 hit time and a correct entry-window clock time.
+    let repaired = false;
+
+    // (0) step2Ts: older setups saved only step2Time (HH:MM). Reconstruct the
+    //     full timestamp by scanning candles backwards from createdTs for the
+    //     MOST RECENT candle that actually crossed the step-2 level.
+    if (!activeSetup.step2Ts && activeSetup.bslLevel != null && activeSetup.sslLevel != null) {
+      const isBuy     = activeSetup.direction === "BUY";
+      const step2Lvl  = isBuy ? activeSetup.sslLevel : activeSetup.bslLevel;
+      const anchor    = (activeSetup.createdTs ?? Date.now()) / 1000;
+      const scanStart = anchor - 3 * 24 * 3600; // up to 3 days back
+      const hit = [...candles]
+        .filter(c => c.timestamp >= scanStart && c.timestamp <= anchor)
+        .sort((a, b) => b.timestamp - a.timestamp)
+        .find(c => isBuy ? c.low <= step2Lvl : c.high >= step2Lvl);
+      if (hit) {
+        activeSetup.step2Ts   = hit.timestamp;
+        activeSetup.step2Time = tsToETLabel(hit.timestamp);
+        repaired = true;
+      }
+    }
+
+    // (1) step1Ts: the step-1 sweep must happen AFTER the reference cycle ends
+    //     (otherwise we'd be labelling the cycle-forming candle as a "sweep",
+    //     which is a semantic error — the level isn't "defined" until the
+    //     cycle closes). Parse cycleLabel (e.g. "18:00-00:00" or "Prev 12:00-18:00")
+    //     to find the actual cycle-end boundary, then scan forward from there.
+    //     If no post-cycle hit exists, leave step1Ts null (honest = unknown).
+    if (!activeSetup.step1Ts && activeSetup.step2Ts && activeSetup.bslLevel != null && activeSetup.sslLevel != null) {
+      const isBuy    = activeSetup.direction === "BUY";
+      const level    = isBuy ? activeSetup.bslLevel : activeSetup.sslLevel;
+      const cycleEndTs = findCycleEndTs(activeSetup.cycleLabel, activeSetup.step2Ts, candles);
+      // Without a reliable cycle-end, don't backscan.
+      if (cycleEndTs) {
+        const hit = [...candles]
+          .filter(c => c.timestamp >= cycleEndTs && c.timestamp < activeSetup.step2Ts)
+          .sort((a, b) => a.timestamp - b.timestamp)
+          .find(c => isBuy ? c.high >= level : c.low <= level);
+        if (hit) {
+          activeSetup.step1Ts   = hit.timestamp;
+          activeSetup.step1Time = tsToETLabel(hit.timestamp);
+          repaired = true;
+        }
+      }
+    }
+
+    // (2) entryWindowTime: derive from nextPhase2Label every tick so legacy
+    //     setups (saved with the old buggy formatter) self-heal.
+    const LBL_TO_ENTRY = {
+      "19:30–21:00": "20:45", "01:30–03:00": "02:45",
+      "07:30–09:00": "08:45", "13:30–15:00": "14:45",
+    };
+    const correctEntry = LBL_TO_ENTRY[activeSetup.nextPhase2Label];
+    if (correctEntry && activeSetup.entryWindowTime !== correctEntry) {
+      activeSetup.entryWindowTime = correctEntry;
+      activeSetup.entryWindowTs = null; // force recompute to entry-candle ts (+75)
+      repaired = true;
+    }
+
+    // (2-fix) Setups created when all of the current trading day's P2 windows
+    //     had already passed used to save nextPhase2Label="soon" + null window.
+    //     Re-derive from the (now wrap-aware) getNextPhase2 so they fill in.
+    if (activeSetup.tf !== "daily" &&
+        (activeSetup.nextPhase2Label === "soon" || !activeSetup.entryWindowTime)) {
+      const p2 = getNextPhase2(dayStartTs);
+      if (p2) {
+        const clockMin = (p2.startMin + 75 + 18 * 60) % 1440;
+        const derivedEntry = `${String(Math.floor(clockMin / 60)).padStart(2, "0")}:${String(clockMin % 60).padStart(2, "0")}`;
+        activeSetup.nextPhase2Label = p2.label;
+        activeSetup.entryWindowTime = derivedEntry;
+        activeSetup.entryWindowTs   = Math.floor(p2.startTs + 75 * 60);
+        repaired = true;
+      }
+    }
+
+    // (2a) Backfill step1Ts / step2Ts / entryTs from their HH:MM string counterparts
+    //     using createdTs/entryTs as date anchors. Ensures display shows the
+    //     full ET date + time across ALL markets, even for legacy log entries
+    //     saved under older code paths.
+    const reconstructTsFromHHMM = (hhmm, anchorTs) => {
+      if (!hhmm || !anchorTs) return null;
+      const m = hhmm.match(/^(\d{1,2}):(\d{2})$/);
+      if (!m) return null;
+      const targetMins = parseInt(m[1]) * 60 + parseInt(m[2]);
+      const fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", hourCycle: "h23",
+        year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit",
+      });
+      const parts = Object.fromEntries(fmt.formatToParts(new Date(anchorTs * 1000))
+        .filter(p => p.type !== "literal").map(p => [p.type, p.value]));
+      const anchorMins = parseInt(parts.hour) * 60 + parseInt(parts.minute);
+      // Walk back through candles; pick the nearest candle at/before anchor whose
+      // HH:MM matches the target — gives the correct absolute ts even across DST.
+      for (let i = candles.length - 1; i >= 0; i--) {
+        const c = candles[i];
+        if (c.timestamp > anchorTs) continue;
+        const ct = new Intl.DateTimeFormat("en-US", {
+          timeZone: "America/New_York", hourCycle: "h23",
+          hour: "2-digit", minute: "2-digit",
+        }).format(new Date(c.timestamp * 1000));
+        if (ct === hhmm) return c.timestamp;
+      }
+      return null;
+    };
+    const createdTsSec = (activeSetup.createdTs ?? 0) / 1000 || null;
+    if (!activeSetup.step1Ts && activeSetup.step1Time && createdTsSec) {
+      const t = reconstructTsFromHHMM(activeSetup.step1Time, createdTsSec);
+      if (t) { activeSetup.step1Ts = t; repaired = true; }
+    }
+    if (!activeSetup.step2Ts && activeSetup.step2Time && createdTsSec) {
+      const t = reconstructTsFromHHMM(activeSetup.step2Time, createdTsSec);
+      if (t) { activeSetup.step2Ts = t; repaired = true; }
+    }
+    // Fallback: use sweepPrice (exact match against candle extreme) to pin step2Ts.
+    // Pick the CLOSEST match (diff) to handle tiny fp rounding; never a loose
+    // tolerance that would match any neighboring candle.
+    if (!activeSetup.step2Ts && activeSetup.sweepPrice != null) {
+      const searchStart = activeSetup.step1Ts ?? 0;
+      const target = activeSetup.sweepPrice;
+      const isBuy = activeSetup.direction === "BUY";
+      let best = null, bestDiff = Infinity;
+      for (const c of candles) {
+        if (c.timestamp <= searchStart) continue;
+        const diff = isBuy ? Math.abs(c.low - target) : Math.abs(c.high - target);
+        if (diff < bestDiff) { bestDiff = diff; best = c; }
+      }
+      // Only accept if the match is essentially exact (0.01% or one tick).
+      const acceptable = target > 1000 ? 0.5 : target > 10 ? 0.05 : 0.0005;
+      if (best && bestDiff <= acceptable) {
+        activeSetup.step2Ts = best.timestamp;
+        activeSetup.step2Time = tsToETLabel(best.timestamp);
+        repaired = true;
+      }
+    }
+    if (!activeSetup.entryTime && activeSetup.entryTs) {
+      activeSetup.entryTime = tsToETLabel(activeSetup.entryTs / 1000);
+      repaired = true;
+    }
+
+    // (1b) SL drift check: if this setup is ACTIVE/CLOSED and has step2Ts +
+    //      entryTs, recompute the canonical SL and correct it if it drifted.
+    //      This makes the code self-healing — no more manual re-audits.
+    if (activeSetup.step2Ts && activeSetup.entryTs && activeSetup.entry) {
+      const entryTsSec = activeSetup.entryTs > 1e12 ? activeSetup.entryTs / 1000 : activeSetup.entryTs;
+      const canonicalSL = computeSweepSL({
+        direction:  activeSetup.direction,
+        candles,
+        step2Ts:    activeSetup.step2Ts,
+        entryTs:    entryTsSec,
+        entryPrice: activeSetup.entry,
+        sweepPrice: activeSetup.sweepPrice,
+      });
+      // Only realign when drift > one tick (avoid noise from fp rounding).
+      const tick = activeSetup.entry > 100 ? 0.1 : 0.0001;
+      if (Math.abs((activeSetup.sl ?? canonicalSL) - canonicalSL) > tick) {
+        activeSetup.sl  = canonicalSL;
+        const tpRes     = computeSweepTP(activeSetup.direction, activeSetup.entry, canonicalSL);
+        activeSetup.tp1 = tpRes.tp1;
+        activeSetup.tp2 = tpRes.tp2;
+        repaired = true;
+      }
+    }
+
+    // (2b) entryWindowTs: compute the absolute timestamp (sec) when entry window
+    //     opens. First try candle-match (gives us real data alignment); fall
+    //     back to PHASE2 cycle math based on the current trading day when the
+    //     entry is still in the future (no candle yet).
+    if (activeSetup.entryWindowTime && !activeSetup.entryWindowTs) {
+      const target = activeSetup.entryWindowTime;
+      const anchorTs = (activeSetup.createdTs ?? Date.now()) / 1000;
+      const fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", hourCycle: "h23",
+        hour: "2-digit", minute: "2-digit",
+      });
+      let found = candles.find(c =>
+        c.timestamp >= anchorTs && fmt.format(new Date(c.timestamp * 1000)) === target
+      )?.timestamp;
+      if (!found) {
+        // Future-time path: match the P2 cycle that produced nextPhase2Label.
+        const p2Entry = Object.entries(PHASE2).find(([, p]) => p.label === activeSetup.nextPhase2Label);
+        if (p2Entry) {
+          const [, p2] = p2Entry;
+          let ts = dayStartTs + (p2.startMin + 75) * 60;
+          // If the current trading day's window already passed, jump to next day.
+          if (ts <= anchorTs) ts += 24 * 3600;
+          found = ts;
+        }
+      }
+      if (found) { activeSetup.entryWindowTs = found; repaired = true; }
+    }
+
+    if (repaired) {
+      await saveSetup(marketKey, activeSetup);
+      reconcileActiveSetup(activeSetup); // propagate to setup_log + Mongo
+    }
+
+    // (3) Invalid-pattern gate: a WAITING_PHASE2 setup that lacks a time-ordered
+    //     step 1 (step1Ts < step2Ts) is not a real sweep-sweep pattern — clear
+    //     it so the user doesn't see a "SWEEP ✓ wacht entry" that never had a
+    //     first leg. Only applies pre-entry; ACTIVE/CLOSED stays as historic.
+    if (activeSetup && activeSetup.status === "WAITING_PHASE2") {
+      const bad = !activeSetup.step1Ts || !activeSetup.step2Ts || activeSetup.step1Ts >= activeSetup.step2Ts;
+      if (bad) {
+        logEvent(marketKey, "SETUP_CLEARED",
+          `${activeSetup.direction} ${activeSetup.tf} — step-1 not confirmed before step-2; invalid sweep pattern`,
+          "skipped");
+        await clearSetup(marketKey, activeSetup, "invalid sweep pattern"); activeSetup = null;
+      }
+    }
+
+    if (activeSetup) {
+      const { priceMin, priceMax } = MARKETS[marketKey];
+      const entryOk = activeSetup.entry >= priceMin && activeSetup.entry <= priceMax;
+      const dirOk   = !allowedDirection || allowedDirection === activeSetup.direction;
+      // Once a setup is ACTIVE, the trade is live — let it mature to SL/TP via
+      // verifySetupAgainstCandles instead of clearing it on a lock flip. Clearing
+      // an ACTIVE setup orphans its setup_log entry (status stays ACTIVE forever)
+      // because clearSetup only wipes per-market state + active_setups, not the log.
+      const isActive = activeSetup.status === "ACTIVE";
+      if (!entryOk) {
+        logEvent(marketKey, "SETUP_CLEARED", `Corrupt setup (entry ${activeSetup.entry} outside range) — cleared`);
+        await clearSetup(marketKey, activeSetup, `entry ${activeSetup.entry} outside range`); activeSetup = null;
+      } else if (!dirOk && !isActive) {
+        logEvent(marketKey, "SETUP_CLEARED", `Setup direction ${activeSetup.direction} conflicts with lock ${lockState?.direction} — cleared`);
+        await clearSetup(marketKey, activeSetup, `bias flip → ${lockState?.direction}`); activeSetup = null;
+      }
+    }
+  }
+
+  // Process card events — all step-1 alerts first, then the first step-2 creates a setup
+  for (const ev of cardEvents.filter(e => e.step === 1)) {
+    const { tf, direction, ref, cycleLabel } = ev;
+    const isBuy    = direction === "BUY";
+    const hitTime  = isBuy ? ref.hitHigh?.time : ref.hitLow?.time;
+    await sendDiscordStep1(marketKey, tf, direction, cycleLabel, ref.high, ref.low, hitTime);
+  }
+
+  const completeEv = cardEvents.find(e => e.step === 2);
+  if (completeEv) {
+    const { tf, direction, ref, cycleLabel } = completeEv;
+    const isBuy      = direction === "BUY";
+    const bslLevel   = ref.high;
+    const sslLevel   = ref.low;
+    // Timestamps (seconds since epoch) for the two sweep hits — needed later to
+    // compute the lowest/highest print across the WHOLE sweep window for SL.
+    let step1Ts      = isBuy ? ref.hitHigh?.ts   : ref.hitLow?.ts;
+    let step2Ts      = isBuy ? ref.hitLow?.ts    : ref.hitHigh?.ts;
+    // Backscan: if the ref cycle didn't record step 1, scan candles between
+    // the cycle's end and step 2 for the first candle that crossed the level.
+    // Constrained to POST-CYCLE candles — pre-cycle candles that merely form
+    // the level don't count as sweeps.
+    if (!step1Ts && step2Ts) {
+      const cycleEndTs = findCycleEndTs(cycleLabel, step2Ts, candles);
+      if (cycleEndTs) {
+        const level = isBuy ? bslLevel : sslLevel;
+        const scanHit = candles
+          .filter(c => c.timestamp >= cycleEndTs && c.timestamp < step2Ts)
+          .sort((a, b) => a.timestamp - b.timestamp)
+          .find(c => isBuy ? c.high >= level : c.low <= level);
+        if (scanHit) step1Ts = scanHit.timestamp;
+      }
+    }
+    // VALIDITY GATE: a valid sweep-sweep needs step 1 (level hit) BEFORE step 2
+    // (opposite level swept). Without a confirmed, time-ordered step 1 this is
+    // not a real sweep pattern — don't create a setup for it.
+    const validSweepPattern = !!(step1Ts && step2Ts && step1Ts < step2Ts);
+    if (!validSweepPattern) {
+      logEvent(marketKey, "SETUP_SKIPPED",
+        `${direction} | ${tf} | step-1 not confirmed before step-2 — invalid sweep pattern`,
+        "skipped");
+    }
+    const step1Time  = step1Ts ? tsToETLabel(step1Ts) : (isBuy ? ref.hitHigh?.time : ref.hitLow?.time);
+    const step2Time  = step2Ts ? tsToETLabel(step2Ts) : (isBuy ? ref.hitLow?.time  : ref.hitHigh?.time);
+    const entryPrice = isBuy ? sslLevel : bslLevel;
+    const sweepPrice = isBuy ? ref.hitLow?.price : ref.hitHigh?.price;
+    const tfSrc      = tf === "90min" ? "90M" : tf;
+
+    // Daily: entry fires on the OPEN of the next 06:00 ET candle strictly after
+    // step-2 (no Phase2 window logic). 6H/90M: entry window opens at the 6H
+    // Phase 2 start + 60min, entry candle is +15min later (handled at trigger).
+    let entryWindowTime, entryWindowTs, nextPhase2Label;
+    if (tf === "daily") {
+      const dailyFmt = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York", hourCycle: "h23", hour: "2-digit", minute: "2-digit",
+      });
+      const next6 = step2Ts
+        ? candles.find(c => c.timestamp > step2Ts && dailyFmt.format(new Date(c.timestamp * 1000)) === "06:00")
+        : null;
+      entryWindowTime = "06:00";
+      entryWindowTs   = next6?.timestamp ?? null;
+      nextPhase2Label = "Daily 06:00";
+    } else {
+      // Prefer the currently-active Phase 2 window (we might still be in it).
+      // Only fall back to the next P2 if we're currently between windows.
+      const relevantP2 = phaseInfo.activeP2 ?? getNextPhase2(dayStartTs);
+      // Entry candle opens at Phase 2 start + 75 min (e.g. C1 P2=19:30 → entry 20:45).
+      // relevantP2.startMin is minutes-since-18:00 ET (the trading day anchor), so
+      // to get clock-time we shift by 18h and wrap at 24h.
+      const entryWindowMin = relevantP2 ? relevantP2.startMin + 75 : null;
+      entryWindowTime = entryWindowMin != null
+        ? (() => {
+            const clockMin = (entryWindowMin + 18 * 60) % 1440;
+            return `${String(Math.floor(clockMin / 60)).padStart(2, "0")}:${String(clockMin % 60).padStart(2, "0")}`;
+          })()
+        : null;
+      // Absolute timestamp (seconds since epoch) of the entry candle —
+      // lets the UI render the full date+time unambiguously (e.g. "Fri 04/24 08:45").
+      entryWindowTs   = relevantP2 ? Math.floor(relevantP2.startTs + 75 * 60) : null;
+      nextPhase2Label = relevantP2?.label ?? "soon";
+    }
+
+    if (validSweepPattern) {
+    const setupId = `${marketKey}-${tfSrc}-${Date.now()}`;
+    const setup = {
+      id:              setupId,
+      market:          marketKey,
+      direction,
+      tf,
+      source:          tfSrc,
+      bslLevel,
+      sslLevel,
+      level:           entryPrice,
+      entry:           entryPrice,
+      sl: null, tp1: null, tp2: null,
+      sweepPrice,
+      step1Time,
+      step2Time,
+      step1Ts,
+      step2Ts,
+      cycleLabel,
+      adminBias,
+      lockStrength:    lockState?.strength ?? 0,
+      lockState:       lockState?.direction ?? null,
+      createdTime:     tsToETLabel(Date.now() / 1000),
+      createdTs:       Date.now(),
+      status:          "WAITING_PHASE2",
+      nextPhase2Label,
+      entryWindowTime,              // "20:45" etc — when the entry candle opens
+      entryWindowTs,                // seconds-since-epoch — for date-aware display
+      entryTime:       null,         // set when entry triggers
+      entryTriggered:  false,
+      windowAlertSent: false,
+      tp1Hit: false, tp2Hit: false, slHit: false,
+    };
+
+    logEvent(marketKey, "SETUP_CREATED", `${direction} | ${tf} both swept | [${cycleLabel}] | Window: ${setup.nextPhase2Label}`, "setup_active");
+
+    const setupLog = readJSON(SETUP_LOG_FILE, []);
+    // Snapshot the current daily-lock direction at setup creation so the
+    // journal can later filter by lock alignment without re-running detection.
+    const lockAtEntry = lockState?.direction ?? null;
+    const lockAlignmentAtEntry = lockAtEntry == null ? "none"
+      : (direction === "BUY"  && lockAtEntry === "BULLISH") ? "with"
+      : (direction === "SELL" && lockAtEntry === "BEARISH") ? "with"
+      : "against";
+    const logEntry = {
+      id:        setupId,
+      market:    marketKey,
+      direction,
+      tf,
+      source:    tfSrc,
+      side:      isBuy ? "LOW" : "HIGH",
+      bslLevel,
+      sslLevel,
+      entry:     entryPrice,          // target entry — overwritten with actual at trigger
+      sweepPrice,
+      step1Time,
+      step2Time,
+      cycleLabel,
+      window:    setup.nextPhase2Label,
+      entryWindowTime,
+      entryWindowTs,
+      status:    "WAITING_PHASE2",
+      sl: null, tp1: null, tp2: null,
+      ts:        Date.now(),
+      datetime:  tsToETDateTime(Date.now() / 1000),
+      outcome:   null,
+      lockAtEntry,
+      lockStrength:   lockState?.strength ?? null,
+      lockAlignment:  lockAlignmentAtEntry,
+    };
+    setupLog.unshift(logEntry);
+    writeJSON(SETUP_LOG_FILE, setupLog.slice(0, 10000));
+    mirrorSetupHistory(logEntry); // fire-and-forget durable copy
+
+    updateWeeklyRecap(marketKey, { type: "setup", direction, source: tfSrc, entry: entryPrice, time: setup.createdTime });
+
+    await saveSetup(marketKey, setup);
+    activeSetup = setup;
+
+    await sendDiscordSetup(setup);
+    } // end validSweepPattern gate
+  }
+
+  // ── Phase 2 execution check ───────────────────────────────────────────────
+  // Daily setups have no Phase2 — they fire on the OPEN of the 06:00 ET candle
+  // exactly (entryWindowTs). Handle them BEFORE the 6H/90M phase2 path so the
+  // shared trigger flow works without phaseInfo gating.
+  if (activeSetup && activeSetup.status === "WAITING_PHASE2" && activeSetup.tf === "daily") {
+    const ewTs = activeSetup.entryWindowTs;
+    const entryCandle = ewTs ? candles.find(c => c.timestamp === ewTs) : null;
+    if (entryCandle && !activeSetup.entryTriggered) {
+      const dec = entryCandle.open > 100 ? 1 : 5;
+      const actualEntry = +entryCandle.open.toFixed(dec);
+      const slPrice = computeSweepSL({
+        direction:  activeSetup.direction,
+        candles,
+        step2Ts:    activeSetup.step2Ts,
+        entryTs:    entryCandle.timestamp,
+        entryPrice: actualEntry,
+        sweepPrice: activeSetup.sweepPrice,
+      });
+      const { tp1, tp2 } = computeSweepTP(activeSetup.direction, actualEntry, slPrice);
+      activeSetup.entry = actualEntry;
+      activeSetup.level = actualEntry;
+      activeSetup.sl = slPrice;
+      activeSetup.tp1 = tp1;
+      activeSetup.tp2 = tp2;
+      activeSetup.entryTriggered = true;
+      activeSetup.status = "ACTIVE";
+      activeSetup.entryTs = entryCandle.timestamp * 1000;
+      activeSetup.entryTime = tsToETLabel(entryCandle.timestamp);
+      logEvent(marketKey, "ENTRY_TRIGGERED",
+        `${activeSetup.direction} @ ${actualEntry} (daily 06:00) | SL: ${slPrice} | TP1: ${tp1}`, "entry");
+      patchSetupLog(activeSetup.id, {
+        entry: actualEntry, sl: slPrice, tp1, tp2,
+        entryTime: activeSetup.entryTime, entryTs: activeSetup.entryTs, status: "ACTIVE",
+      });
+      updateWeeklyRecap(marketKey, { type: "trade_open" });
+      await saveSetup(marketKey, activeSetup);
+      cfNotifySignal(activeSetup, marketKey).catch(() => {});
+    }
+  }
+
+  if (activeSetup && activeSetup.status === "WAITING_PHASE2" && activeSetup.tf !== "daily") {
+    // Send entry window alert at Phase2.startMin + 60 (heads-up; entry candle fires at +75)
+    if (phaseInfo.inPhase2 && !activeSetup.windowAlertSent) {
+      const entryWindowMin = phaseInfo.activeP2.startMin + 60;
+      if (phaseInfo.minsIntoDay >= entryWindowMin) {
+        activeSetup.windowAlertSent = true;
+        saveSetup(marketKey, activeSetup);
+        const windowLabel = phaseInfo.activeP2.label;
+        await sendDiscordEntryWindow(activeSetup, windowLabel);
+      }
+    }
+
+    if (phaseInfo.inPhase2 && activeSetup.windowAlertSent) {
+      // TIME-BASED entry: enter on the OPEN of the 15-min candle that opens
+      // 75 min after Phase 2 start (e.g. 02:45 for C2). Skips the volatile
+      // first candle at window-open (+60); gives a stable reference price.
+      const entryCandleTs = phaseInfo.activeP2.startTs + 75 * 60;         // entry candle (e.g. 02:45)
+      const windowCandles = candles.filter(c => c.timestamp >= entryCandleTs);
+
+      if (!activeSetup.entryTriggered && windowCandles.length > 0) {
+        const entryCandle = windowCandles[0];
+        const actualEntry = entryCandle.open;
+
+        const dec = actualEntry > 100 ? 1 : 5;
+        const buf = actualEntry > 10000 ? 5 : actualEntry > 1000 ? 2 : actualEntry > 10 ? 0.5 : 0.0005;
+
+        // SL structural: take the extreme of the ENTIRE sweep window.
+        //   BUY  → lowest low  from step-2 SSL-sweep through entry candle (-buf)
+        //   SELL → highest high from step-2 BSL-sweep through entry candle (+buf)
+        // Canonical SL: delegate to computeSweepSL — single source of truth
+        // for the sweep-window rule, shared with backtest + reconcile paths.
+        const slPrice = computeSweepSL({
+          direction:  activeSetup.direction,
+          candles,
+          step2Ts:    activeSetup.step2Ts,
+          entryTs:    entryCandle.timestamp,
+          entryPrice: actualEntry,
+          sweepPrice: activeSetup.sweepPrice,
+        });
+
+        activeSetup.entry = +actualEntry.toFixed(dec);
+        activeSetup.level = activeSetup.entry;
+        activeSetup.sl    = slPrice;
+        const { tp1, tp2 } = computeSweepTP(activeSetup.direction, activeSetup.entry, activeSetup.sl);
+        activeSetup.tp1 = tp1;
+        activeSetup.tp2 = tp2;
+
+        activeSetup.entryTriggered = true;
+        activeSetup.status  = "ACTIVE";
+        activeSetup.entryTs = entryCandle.timestamp * 1000;
+        activeSetup.entryTime = tsToETLabel(entryCandle.timestamp);
+
+        logEvent(marketKey, "ENTRY_TRIGGERED", `${activeSetup.direction} @ ${activeSetup.entry} (time-based) | SL: ${activeSetup.sl} | TP1: ${activeSetup.tp1} | Window: ${phaseInfo.activeP2?.label}`, "entry");
+        patchSetupLog(activeSetup.id, {
+          entry:     activeSetup.entry,
+          sl:        activeSetup.sl,
+          tp1:       activeSetup.tp1,
+          tp2:       activeSetup.tp2,
+          entryTime: activeSetup.entryTime,
+          entryTs:   activeSetup.entryTs,
+          status:    "ACTIVE",
+        });
+        updateWeeklyRecap(marketKey, { type: "trade_open" });
+        await saveSetup(marketKey, activeSetup);
+        cfNotifySignal(activeSetup, marketKey).catch(() => {});
+        const _fp2 = p => p > 100 ? Number(p).toFixed(1) : Number(p).toFixed(5);
+        await sendDiscordTradeEvent(marketKey, "ENTRY_TRIGGERED",
+          `${activeSetup.direction} @ ${_fp2(activeSetup.entry)} | SL: ${_fp2(activeSetup.sl)} | TP: ${_fp2(activeSetup.tp1)}`);
+      } else if (!activeSetup.entryTriggered) {
+        logEvent(marketKey, "WAITING_PHASE2_ENTRY", `${activeSetup.direction} @ ${activeSetup.entry} | Current: ${currentPrice} | Entry window open (14:30+)`, "waiting");
+      }
+    } else if (phaseInfo.inPhase2 && !activeSetup.windowAlertSent) {
+      logEvent(marketKey, "WAITING_ENTRY_WINDOW", `${activeSetup.direction} setup — Phase 2 actief, wacht op entry window (+60 min)`, "waiting");
+    } else {
+      logEvent(marketKey, "ENTRY_SKIPPED", `${activeSetup.direction} setup — outside Phase 2 window. Phase: ${phaseInfo.phase} | Cycle: ${phaseInfo.currentCycle}`, "skipped");
+    }
+  }
+
+  // ── Active trade monitoring ───────────────────────────────────────────────
+  if (activeSetup && activeSetup.status === "ACTIVE") {
+    const { direction, entry, sl, tp1, tp2 } = activeSetup;
+    const fp = p => p > 100 ? p.toFixed(1) : p.toFixed(5);
+
+    // Check SL
+    if (!activeSetup.slHit) {
+      const slHit = direction === "BUY"
+        ? candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.low  <= sl)
+        : candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.high >= sl);
+      if (slHit) {
+        activeSetup.slHit = true;
+        activeSetup.status = "CLOSED_SL";
+        logEvent(marketKey, "SL_HIT", `${direction} SL @ ${fp(sl)} | Entry was ${fp(entry)}`, "sl_hit");
+        updateSetupLogOutcome(activeSetup.id, "LOSS", { outcomePrice: sl });
+        updateWeeklyRecap(marketKey, { type: "trade_loss" });
+        await sendDiscordTradeEvent(marketKey, "SL_HIT", `${direction} @ ${fp(entry)} → SL ${fp(sl)}`);
+        // SL hits both legs (same SL on TP1 + TP2 leg) — cancel both signals.
+        cfCancelSignal(activeSetup, "all").catch(() => {});
+        saveSetup(marketKey, activeSetup);
+      }
+    }
+
+    // Check TP1
+    if (!activeSetup.tp1Hit && !activeSetup.slHit) {
+      const tp1Hit = direction === "BUY"
+        ? candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.high >= tp1)
+        : candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.low  <= tp1);
+      if (tp1Hit) {
+        activeSetup.tp1Hit = true;
+        logEvent(marketKey, "TP1_HIT", `${direction} TP1 @ ${fp(tp1)} ✅  (1:2 RR)`, "tp1_hit");
+        patchSetupLog(activeSetup.id, { tp1Hit: true, tp1HitTime: tsToETDateTime(Date.now() / 1000) });
+        await sendDiscordTradeEvent(marketKey, "TP1_HIT", `${direction} @ ${fp(entry)} → TP1 ${fp(tp1)} ✅`);
+        // Close TP1 leg only — TP2 leg keeps running until TP2 or SL.
+        cfCancelSignal(activeSetup, "tp1").catch(() => {});
+        saveSetup(marketKey, activeSetup);
+      }
+    }
+
+    // Check TP2
+    if (!activeSetup.tp2Hit && !activeSetup.slHit) {
+      const tp2Hit = direction === "BUY"
+        ? candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.high >= tp2)
+        : candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.low  <= tp2);
+      if (tp2Hit) {
+        activeSetup.tp2Hit = true;
+        activeSetup.status = "CLOSED_TP2";
+        logEvent(marketKey, "TP2_HIT", `${direction} TP2 @ ${fp(tp2)} 🏆  (1:3 RR)`, "tp2_hit");
+        updateSetupLogOutcome(activeSetup.id, "WIN", { outcomePrice: tp2 });
+        updateWeeklyRecap(marketKey, { type: "trade_win" });
+        await sendDiscordTradeEvent(marketKey, "TP2_HIT", `${direction} @ ${fp(entry)} → TP2 ${fp(tp2)} 🏆`);
+        // Close TP2 leg. TP1 leg should already be cancelled (TP1 is always
+        // crossed before TP2), but cancel both to be safe — cancelling an
+        // already-removed signal is a no-op.
+        cfCancelSignal(activeSetup, "all").catch(() => {});
+        saveSetup(marketKey, activeSetup);
+      }
+    }
+
+    // Live PnL log
+    const pnl = direction === "BUY" ? currentPrice - entry : entry - currentPrice;
+    const risk = Math.abs(entry - sl);
+    const rr   = risk > 0 ? (pnl / risk).toFixed(2) : "0";
+    logEvent(marketKey, "TRADE_ACTIVE", `${direction} | Entry: ${fp(entry)} | Now: ${fp(currentPrice)} | PnL: ${pnl > 0 ? "+" : ""}${pnl.toFixed(1)} pts | ${rr}R`, "active");
+  }
+
+  // Reconcile: ensure setup_log reflects the canonical state of the active
+  // setup (catches edge cases like mis-attributed outcomes or missed patches).
+  reconcileActiveSetup(activeSetup);
+
+  // Also verify ANY other ACTIVE setup_log entries for this market — needed
+  // because the active-slot file holds only one setup per market, so a 6H + 90M
+  // pair gets one of them orphaned. Without this scan the orphan never closes.
+  verifyOrphanedActives(marketKey, candles, activeSetup?.id ?? null);
+
+  // ── Write market data for dashboard/API ───────────────────────────────────
+  const lastCandle = candles[candles.length - 1];
+  // Daily entry reference: the OPEN of the 06:00 ET candle on the current
+  // trading day. Used by the Daily card on the dashboard to show real entry
+  // price + live PnL when the daily pattern triggers at 06:00.
+  const dailyEntryFmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hourCycle: "h23", hour: "2-digit", minute: "2-digit",
+  });
+  let dailyEntryOpen = null, dailyEntryTs = null;
+  for (let i = candles.length - 1; i >= 0; i--) {
+    const c = candles[i];
+    if (dailyEntryFmt.format(new Date(c.timestamp * 1000)) === "06:00") {
+      dailyEntryOpen = c.open;
+      dailyEntryTs   = c.timestamp;
+      break;
+    }
+  }
+  writeMarketData(marketKey, {
+    market: marketKey,
+    label: MARKETS[marketKey].label,
+    tvSymbol: MARKETS[marketKey].tvSymbol,
+    currentPrice,
+    currentTime,
+    dailyEntryOpen,
+    dailyEntryTs,
+    adminBias,
+    lockState: lockState ? {
+      direction:     lockState.direction,
+      strength:      lockState.strength,
+      note:          lockState.note,
+      keyDates:      lockState.keyDates ?? [],
+      matchCount:    lockState.matchCount,
+      daysSinceLast: lockState.daysSinceLast,
+      movesAgainst:  lockState.movesAgainst,
+      steps:         lockState.steps ?? [],
+    } : null,
+    sixHLockState: sixHLockState ? {
+      direction:     sixHLockState.direction,
+      strength:      sixHLockState.strength,
+      note:          sixHLockState.note,
+      matchCount:    sixHLockState.matchCount,
+      daysSinceLast: sixHLockState.daysSinceLast,
+      movesAgainst:  sixHLockState.movesAgainst,
+      steps:         sixHLockState.steps ?? [],
+    } : null,
+    orderFlowBias,
+    allowedDirection,
+    phaseInfo: {
+      phase: phaseInfo.phase,
+      inPhase2: phaseInfo.inPhase2,
+      currentCycle: phaseInfo.currentCycle,
+      activeP2: phaseInfo.activeP2 ? { cycle: phaseInfo.activeP2.cycle, label: phaseInfo.activeP2.label } : null,
+    },
+    activeSetup,
+    cycles6H: Object.values(cycles6H).map(c => ({
+      name: c.name, label: c.label, status: c.status,
+      high: c.high, low: c.low, hitHigh: c.hitHigh, hitLow: c.hitLow,
+    })),
+    cycles90: Object.values(cycles90)
+      .sort((a, b) => a.index - b.index)
+      .slice(-8)
+      .map(c => ({
+        index: c.index, startTime: c.startTime, endTime: c.endTime,
+        complete: c.complete, high: c.high, low: c.low,
+        hitHigh: c.hitHigh, hitLow: c.hitLow,
+      })),
+    dailyLevels: (() => {
+      // Prefer D-TF levels (correct session boundaries matching user's chart).
+      // D-candle labels are now close-date-aligned (+1 day fix in buildDailyLockMoves).
+      const all = dailyLockLevels ?? dailyDays.slice(-10).map(d => ({
+        date: d.date, high: d.high, low: d.low,
+        hitHigh: d.hitHigh, hitLow: d.hitLow, isToday: d.isToday,
+      }));
+      const keys = lockState?.keyDates ?? [];
+      if (!keys.length) return all.slice(-7);
+      // Always include the 7 most recent consecutive trading days so the signal card
+      // can scan a full week of sweep history — not just sparse lock key dates.
+      const last7Dates = new Set(all.slice(-7).map(d => d.date));
+      return all.filter(d => keys.includes(d.date) || last7Dates.has(d.date));
+    })(),
+    scanMeta: {
+      candleCount: candles.length,
+      from: candles[0]?.time_et,
+      to: lastCandle?.time_et,
+      stale: (Date.now() - (lastCandle?.timestamp ?? 0) * 1000) > 20 * 60 * 1000,
+    },
+  });
+}
+
+// ── Main Loop ─────────────────────────────────────────────────────────────────
+async function runMarket(marketKey) {
+  if (!isMarketOpen(marketKey)) {
+    console.log(`[${marketKey}] Market closed, skipping`);
+    return;
+  }
+
+  const tag = `[${marketKey}]`;
+  console.log(`\n${tag} ── Starting analysis ─────────────────────`);
+  logEvent(marketKey, "PHASE_TRANSITION", `Starting scan | ${tsToETLabel(Date.now() / 1000)} ET`, "scan_start");
+
+  try {
+    const switched = await switchToMarket(marketKey);
+    if (!switched) {
+      logEvent(marketKey, "SYSTEM_ERROR", "Chart switch failed — skipping market", "error");
+      return;
+    }
+
+    // 1. Daily lock is now computed inside analyzeMarket from 18:00-ET-aligned
+    //    15-min aggregation (buildDailyStructure). No D-TF pre-fetch needed —
+    //    TV's D-candles for crypto/Coinbase are UTC-aligned which clashes with
+    //    the rest of this engine's 18:00-ET trading-day model.
+    const dailyLockState = null;
+    const dailyLockLevels = null;
+
+    // 2. Fetch 15-min candles — uses on-disk cache, only fetches delta via CDP
+    const { candles, staleWarning, diffMin } = await fetchCandlesWithCache(marketKey);
+    console.log(`${tag} ${candles.length} candles. Last: ${candles[candles.length-1]?.time_et} (${(diffMin||0).toFixed(1)}min old)`);
+
+    // Market data robustness: validate the fetched candles belong to the correct market.
+    // switchToMarket already checked price after switch, but candles could drift if the
+    // MCP session silently switched symbol. Re-validate every scan cycle.
+    const { priceMin: pMin, priceMax: pMax } = MARKETS[marketKey];
+    const lastClose = candles[candles.length - 1]?.close;
+    if (lastClose == null || lastClose < pMin || lastClose > pMax) {
+      logEvent(marketKey, "MARKET_MISMATCH",
+        `15m close ${lastClose} outside expected [${pMin}–${pMax}] for ${marketKey} — skipping to prevent data corruption`,
+        "error");
+      _mcpSession = null; // force full reconnect next run
+      return;
+    }
+
+    if (staleWarning) {
+      logEvent(marketKey, "SYSTEM_WARNING", `Candles stale: ${(diffMin||0).toFixed(1)} min old`, "warning");
+    }
+
+    // Persist candle cache — keep 3 weeks of 15-min bars (~2016 candles)
+    writeJSON(join(__dir, `candles_${marketKey}.json`), candles.slice(-2016));
+
+    await analyzeMarket(marketKey, candles, dailyLockState, dailyLockLevels);
+
+  } catch (err) {
+    console.error(`${tag} Error: ${err.message}`);
+    logEvent(marketKey, "SYSTEM_ERROR", err.message, "error");
+    _mcpSession = null;
+  }
+}
+
+async function main() {
+  console.log("═══════════════════════════════════════════════════════");
+  console.log("  BLACKBULL Liquidity Execution Engine v3.0");
+  console.log(`  ${new Date().toLocaleString("en-US", { timeZone: "America/New_York" })} ET`);
+  console.log("═══════════════════════════════════════════════════════");
+
+  initAdminBias();
+
+  const etH = tsToETHours(Date.now() / 1000);
+  const marketsToRun = ACTIVE_MARKETS.filter(k => isMarketOpen(k));
+  console.log(`Running ${marketsToRun.length} markets (ET ${etH.toFixed(1)}h)`);
+
+  for (let i = 0; i < marketsToRun.length; i++) {
+    const marketKey = marketsToRun[i];
+    await runMarket(marketKey);
+    if (i < marketsToRun.length - 1) {
+      console.log(`Waiting 3s before next market...`);
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+
+  // Return TradingView to NAS100 after all markets
+  try {
+    await mcpCall("tools/call", { name: "change_symbol", arguments: { symbol: MARKETS["NAS100"].tvSymbol } });
+  } catch {}
+
+  console.log(`\n✅ All markets analyzed. ${new Date().toLocaleString("en-US", { timeZone: "America/New_York" })} ET`);
+  await closeDB();
+}
+
+main().catch(err => {
+  console.error("Fatal:", err);
+  process.exit(1);
+});

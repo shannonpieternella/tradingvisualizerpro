@@ -1,0 +1,289 @@
+/* LockBiasPanel — Daily Lock & Bias audit section */
+
+.lbp-wrap { margin: 0 0 16px; }
+
+.lbp-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 20px 6px;
+  font-size: 13px; font-weight: 700; letter-spacing: .08em; color: #00d4ff;
+}
+.lbp-refresh {
+  background: #1a1e26; border: 1px solid #252b36; color: #a0aec0;
+  padding: 4px 12px; border-radius: 5px; cursor: pointer; font-size: 11px;
+}
+
+.lbp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 10px; padding: 0 20px 8px;
+}
+
+/* Card */
+.lbp-card {
+  background: #111418; border: 1px solid #252b36; border-radius: 10px;
+  padding: 12px 14px;
+}
+.lbp-empty { opacity: .4; display: flex; align-items: center; gap: 8px; }
+.lbp-no-data { font-size: 10px; color: #8aaabf; }
+
+/* Card header */
+.lbp-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.lbp-mk    { font-size: 14px; font-weight: 700; color: #00d4ff; letter-spacing: .06em; }
+.lbp-price { font-size: 13px; font-weight: 700; color: #e2e8f0; margin-left: auto; }
+
+/* Bias pill */
+.lbp-bias-pill { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 5px; }
+.lbp-bias-pill.bull { background: rgba(0,255,136,.12); color: #00ff88; border: 1px solid rgba(0,255,136,.3); }
+.lbp-bias-pill.bear { background: rgba(255,62,94,.12);  color: #ff3e5e; border: 1px solid rgba(255,62,94,.3); }
+.lbp-bias-pill.neut { background: rgba(0,212,255,.08);  color: #00d4ff; border: 1px solid rgba(0,212,255,.2); }
+
+.lbp-allowed {
+  font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;
+  background: rgba(77,159,255,.1); color: #4d9fff; border: 1px solid rgba(77,159,255,.25);
+}
+
+/* Lock block */
+.lbp-lock {
+  border-radius: 7px; padding: 8px 12px; margin-bottom: 10px; border-left: 3px solid #252b36;
+}
+.lbp-lock.bull { border-color: #00ff88; background: rgba(0,255,136,.05); }
+.lbp-lock.bear { border-color: #ff3e5e; background: rgba(255,62,94,.05); }
+
+.lbp-lock-dir {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 700; margin-bottom: 5px;
+}
+.lbp-lock-str {
+  font-size: 10px; background: rgba(255,255,255,.06);
+  border-radius: 3px; padding: 1px 5px;
+}
+.lbp-opp {
+  font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; margin-left: auto;
+}
+.lbp-opp.buy  { background: rgba(0,255,136,.15); color: #00ff88; }
+.lbp-opp.sell { background: rgba(255,62,94,.15);  color: #ff3e5e; }
+
+.lbp-lock-note {
+  font-size: 10px; color: #a0aec0;
+  font-family: 'JetBrains Mono','Fira Mono','Consolas',monospace;
+  line-height: 1.6;
+}
+.lbp-no-lock { font-size: 11px; color: #8aaabf; padding: 6px 0 10px; }
+
+/* Active setup */
+.lbp-no-setup { font-size: 10px; color: #8aaabf; padding: 4px 0 8px; }
+.lbp-setup { border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; border-left: 3px solid #252b36; }
+.lbp-setup.buy  { border-color: #00ff88; background: rgba(0,255,136,.05); }
+.lbp-setup.sell { border-color: #ff3e5e; background: rgba(255,62,94,.05); }
+.lbp-setup-title { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
+.lbp-setup-status { margin-left: auto; font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px; }
+.lbp-setup-status.active           { background: rgba(0,255,136,.15); color: #00ff88; }
+.lbp-setup-status.waiting_phase2   { background: rgba(255,215,0,.12); color: #ffd700; }
+.lbp-setup-status.closed_sl        { background: rgba(255,62,94,.15);  color: #ff3e5e; }
+.lbp-setup-status.closed_tp2       { background: rgba(0,255,136,.2);   color: #00ff88; }
+.lbp-setup-levels { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 4px; margin-bottom: 4px; }
+.lbp-lvl { background: #0a0c10; border: 1px solid #252b36; border-radius: 4px; padding: 4px 6px; font-size: 10px; line-height: 1.5; }
+.lbp-lvl.sl    { border-color: rgba(255,62,94,.3);  color: #ff3e5e; }
+.lbp-lvl.entry { border-color: rgba(0,212,255,.3);  color: #00d4ff; }
+.lbp-lvl.tp    { border-color: rgba(0,255,136,.25); color: #00ff88; }
+.lbp-waiting { font-size: 10px; color: #ffd700; margin-top: 4px; }
+
+/* Outcome badges on active setup */
+.lbp-outcome-win  { font-size: 9px; font-weight: 700; color: #00ff88; margin-left: 6px; }
+.lbp-outcome-loss { font-size: 9px; font-weight: 700; color: #ff3e5e; margin-left: 6px; }
+
+/* Live trade progress */
+.lbp-progress { margin-top: 8px; }
+.lbp-progress-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-size: 11px; }
+.lbp-prog-label { color: #8aaabf; font-size: 9px; }
+.lbp-prog-price { color: #e2e8f0; font-weight: 700; }
+.lbp-prog-pnl { font-weight: 700; font-size: 11px; }
+.lbp-prog-r   { font-size: 10px; font-weight: 700; opacity: .85; }
+.lbp-prog-pnl.pos, .lbp-prog-r.pos { color: #00ff88; }
+.lbp-prog-pnl.neg, .lbp-prog-r.neg { color: #ff3e5e; }
+
+.lbp-prog-bar-wrap { display: flex; align-items: center; gap: 4px; margin-bottom: 3px; }
+.lbp-prog-bar-sl  { width: 6px; height: 10px; background: #ff3e5e; border-radius: 2px; flex-shrink: 0; }
+.lbp-prog-bar-tp  { width: 6px; height: 10px; background: #00ff88; border-radius: 2px; flex-shrink: 0; }
+.lbp-prog-bar-track { flex: 1; height: 6px; background: rgba(255,255,255,.06); border-radius: 3px; overflow: hidden; }
+.lbp-prog-bar-fill { height: 100%; border-radius: 3px; transition: width .4s; }
+.lbp-prog-bar-fill.pos { background: linear-gradient(90deg, #00d4ff, #00ff88); }
+.lbp-prog-bar-fill.neg { background: linear-gradient(90deg, #ff3e5e, #ff6b8a); }
+
+.lbp-prog-distances { display: flex; justify-content: space-between; font-size: 9px; }
+.lbp-prog-distances .pos { color: #00ff88; }
+.lbp-prog-distances .neg { color: #ff3e5e; }
+
+/* 90-min sweep context */
+.lbp-sweep-ctx { margin-bottom: 10px; }
+.lbp-sweep-row {
+  display: grid; grid-template-columns: 110px 90px 90px 1fr;
+  gap: 4px; padding: 3px 0; border-bottom: 1px solid rgba(37,43,54,.3);
+  font-size: 10px; align-items: center;
+}
+.lbp-sweep-row:last-child { border-bottom: none; }
+.lbp-sweep-alert { background: rgba(0,212,255,.04); border-radius: 4px; padding: 4px 6px; margin: 2px -6px; }
+.lbp-sweep-time { color: #8aaabf; font-family: 'JetBrains Mono','Consolas',monospace; }
+.lbp-sweep-bsl.hit  { color: #00ff88; }
+.lbp-sweep-bsl.miss { color: #8aaabf; }
+.lbp-sweep-ssl.hit  { color: #ff3e5e; }
+.lbp-sweep-ssl.miss { color: #8aaabf; }
+.lbp-sweep-msg { font-weight: 700; font-size: 9px; }
+.lbp-sweep-msg-await_ssl  { color: #00d4ff; }
+.lbp-sweep-msg-await_bsl  { color: #ffd700; }
+.lbp-sweep-msg-both       { color: #8aaabf; }
+.lbp-sweep-msg-wait       { color: #a0aec0; }
+
+/* Table */
+.lbp-tbl { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 8px; }
+.lbp-tbl th {
+  color: #8aaabf; font-weight: 600; text-align: left;
+  padding: 3px 5px; border-bottom: 1px solid #252b36; font-size: 10px;
+}
+.lbp-tbl td { padding: 4px 5px; border-bottom: 1px solid rgba(37,43,54,.4); }
+.lbp-tbl tr:last-child td { border-bottom: none; }
+.lbp-today { background: rgba(0,212,255,.04); }
+.lbp-date  { color: #a0aec0; font-size: 10px; white-space: nowrap; }
+.hi { color: #00ff88; }
+.lo { color: #ff3e5e; }
+.lbp-hit-y { color: #00ff88; font-size: 10px; white-space: nowrap; }
+.lbp-hit-n { color: #5a7a9a; }
+.lbp-type { font-size: 10px; }
+.lbp-type-high { color: #00ff88; }
+.lbp-type-low  { color: #ff3e5e; }
+.lbp-type-both { color: #ffd700; }
+.lbp-type-—    { color: #8aaabf; }
+
+/* Recent setups history */
+.lbp-history { margin-bottom: 10px; }
+.lbp-section { font-size: 9px; font-weight: 700; letter-spacing: .12em; color: #8aaabf; margin: 8px 0 4px; }
+.lbp-hist-row { display: grid; grid-template-columns: 50px 55px 1fr; gap: 6px; padding: 3px 0; border-bottom: 1px solid rgba(37,43,54,.3); font-size: 10px; }
+.lbp-hist-row:last-child { border-bottom: none; }
+.lbp-hist-time { color: #8aaabf; }
+.lbp-hist-dir.buy  { color: #00ff88; font-weight: 700; }
+.lbp-hist-dir.sell { color: #ff3e5e; font-weight: 700; }
+.lbp-hist-det { color: #a0aec0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lbp-hist-outcome { font-size: 9px; font-weight: 700; white-space: nowrap; }
+.lbp-hist-outcome.win     { color: #00ff88; }
+.lbp-hist-outcome.loss    { color: #ff3e5e; }
+.lbp-hist-outcome.pending { color: #8aaabf; }
+
+/* Bias buttons */
+.lbp-bias-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; padding-top: 8px; border-top: 1px solid #252b36; }
+.lbp-bias-label { font-size: 9px; font-weight: 700; letter-spacing: .1em; color: #8aaabf; }
+.lbp-bias-btn {
+  background: #0a0c10; border: 1px solid #252b36; color: #a0aec0;
+  padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 10px;
+  font-family: 'JetBrains Mono','Fira Mono','Consolas',monospace; font-weight: 700;
+}
+.lbp-bias-btn.active.bullish { border-color: #00ff88; color: #00ff88; background: rgba(0,255,136,.1); }
+.lbp-bias-btn.active.bearish { border-color: #ff3e5e; color: #ff3e5e; background: rgba(255,62,94,.1); }
+.lbp-bias-btn.active.auto    { border-color: #00d4ff; color: #00d4ff; background: rgba(0,212,255,.1); }
+
+@media (max-width: 700px) {
+  .lbp-grid { grid-template-columns: 1fr; padding: 0 10px 8px; }
+}
+
+/* Order Flow Bias section — confluence of daily × 6H */
+.lbp-flow {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(148,163,184,.2);
+  background: rgba(148,163,184,.05);
+}
+.lbp-flow.flow-strong-bull { border-color: rgba(0,255,136,.5); background: rgba(0,255,136,.07); }
+.lbp-flow.flow-bull        { border-color: rgba(0,212,255,.4); background: rgba(0,212,255,.06); }
+.lbp-flow.flow-bull-weak   { border-color: rgba(0,212,255,.2); background: rgba(0,212,255,.03); }
+.lbp-flow.flow-strong-bear { border-color: rgba(255,62,94,.5); background: rgba(255,62,94,.07); }
+.lbp-flow.flow-bear        { border-color: rgba(255,62,94,.4); background: rgba(255,62,94,.06); }
+.lbp-flow.flow-bear-weak   { border-color: rgba(255,62,94,.2); background: rgba(255,62,94,.03); }
+.lbp-flow.flow-neutral     { border-color: rgba(148,163,184,.2); }
+
+.lbp-flow-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.lbp-flow-label   { font-size: 10px; font-weight: 700; color: #94a3b8; letter-spacing: .5px; }
+.lbp-flow-state   { font-size: 13px; font-weight: 800; color: #e2e8f0; text-transform: uppercase; letter-spacing: .3px; }
+.lbp-flow-score   { font-size: 11px; font-weight: 700; color: #94a3b8; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,.06); }
+.lbp-flow-dir     { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; margin-left: auto; }
+.lbp-flow-dir.buy  { background: rgba(0,255,136,.15); color: #00ff88; }
+.lbp-flow-dir.sell { background: rgba(255,62,94,.15); color: #ff3e5e; }
+
+.lbp-flow-note {
+  font-size: 11px; color: #94a3b8; margin-bottom: 8px;
+}
+
+.lbp-flow-breakdown {
+  display: flex; gap: 10px; flex-wrap: wrap;
+}
+.lbp-flow-sub {
+  font-size: 10px; font-weight: 600; padding: 3px 8px;
+  border-radius: 4px; background: rgba(255,255,255,.04);
+  color: #94a3b8;
+}
+.lbp-flow-sub.bull { color: #00ff88; background: rgba(0,255,136,.08); }
+.lbp-flow-sub.bear { color: #ff3e5e; background: rgba(255,62,94,.08); }
+.lbp-flow-sub.neut { color: #94a3b8; }
+
+/* Lock steps — clear 3-step liquidity-pattern explanation */
+.lbp-steps {
+  list-style: none; margin: 8px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.lbp-step {
+  border-left: 2px solid rgba(255,255,255,.12);
+  padding: 6px 0 6px 10px;
+}
+.lbp-step.bos { border-left-color: #fbbf24; }
+.lbp-lock.bull .lbp-step { border-left-color: rgba(0,255,136,.35); }
+.lbp-lock.bear .lbp-step { border-left-color: rgba(255,62,94,.35); }
+.lbp-lock.bull .lbp-step.bos { border-left-color: #fbbf24; }
+.lbp-lock.bear .lbp-step.bos { border-left-color: #fbbf24; }
+.lbp-step-head {
+  display: flex; gap: 8px; align-items: baseline;
+  font-size: 11px; font-weight: 600;
+}
+.lbp-step-num { color: #94a3b8; }
+.lbp-step-tag { color: #cbd5e1; }
+.lbp-step.bos .lbp-step-tag { color: #fbbf24; }
+.lbp-step-body {
+  margin-top: 3px; font-size: 11px; color: #94a3b8; line-height: 1.5;
+}
+.lbp-step-where { color: #cbd5e1; }
+.lbp-step-where b { color: #e2e8f0; font-variant-numeric: tabular-nums; }
+.lbp-step-sweep { margin-top: 2px; color: #94a3b8; }
+.lbp-step-sweep b { color: #cbd5e1; }
+.lbp-step-sweep.bos-line { color: #fbbf24; }
+.lbp-step-sweep.bos-line b { color: #fcd34d; }
+.lbp-step-sweep.muted { color: #64748b; font-style: italic; }
+
+/* Recent structure — closest-to-now bias indicator */
+.lbp-recent {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,.08);
+  background: rgba(255,255,255,.02);
+}
+.lbp-recent.bull     { border-color: rgba(0,255,136,.3); background: rgba(0,255,136,.04); }
+.lbp-recent.bear     { border-color: rgba(255,62,94,.3); background: rgba(255,62,94,.04); }
+.lbp-recent.expand   { border-color: rgba(251,191,36,.3); background: rgba(251,191,36,.04); }
+.lbp-recent.compress { border-color: rgba(148,163,184,.3); background: rgba(148,163,184,.04); }
+.lbp-recent-head { display: flex; align-items: baseline; gap: 8px; }
+.lbp-recent-label { font-size: 10px; font-weight: 700; color: #94a3b8; letter-spacing: 0.5px; }
+.lbp-recent-dir { font-size: 12px; font-weight: 700; }
+.lbp-recent.bull .lbp-recent-dir { color: #00ff88; }
+.lbp-recent.bear .lbp-recent-dir { color: #ff3e5e; }
+.lbp-recent.expand .lbp-recent-dir { color: #fbbf24; }
+.lbp-recent.compress .lbp-recent-dir { color: #94a3b8; }
+.lbp-recent-n { margin-left: auto; font-size: 10px; color: #64748b; }
+.lbp-recent-text { font-size: 11px; color: #cbd5e1; margin: 4px 0 8px; }
+.lbp-recent-table { width: 100%; font-size: 11px; border-collapse: collapse; }
+.lbp-recent-table th { text-align: left; color: #64748b; font-weight: 600; padding: 2px 4px; font-size: 10px; }
+.lbp-recent-table td { padding: 3px 4px; color: #cbd5e1; font-variant-numeric: tabular-nums; }
+.lbp-tag { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; }
+.lbp-tag.bull { background: rgba(0,255,136,.15); color: #00ff88; }
+.lbp-tag.bear { background: rgba(255,62,94,.15); color: #ff3e5e; }
+.lbp-tag.neut { background: rgba(148,163,184,.15); color: #94a3b8; }

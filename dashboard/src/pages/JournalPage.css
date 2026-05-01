@@ -1,0 +1,176 @@
+.jp-wrap {
+  min-height: 100vh;
+  background: #06090e;
+  color: #d6dce5;
+  font-family: "Space Grotesk", system-ui, sans-serif;
+  padding: 20px 24px 60px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.jp-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #1c2532;
+  margin-bottom: 18px;
+}
+.jp-header-left { display: flex; align-items: center; gap: 18px; }
+.jp-back {
+  color: #00d4ff; text-decoration: none; font-size: 13px; opacity: 0.85;
+}
+.jp-back:hover { opacity: 1; }
+.jp-title { font-size: 22px; margin: 0; font-weight: 600; letter-spacing: 0.02em; }
+.jp-header-right { font-size: 13px; opacity: 0.7; }
+
+/* Stats */
+.jp-stats-row {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  margin-bottom: 16px;
+}
+@media (max-width: 900px) { .jp-stats-row { grid-template-columns: repeat(2, 1fr); } }
+.jp-stat {
+  background: #0d1821;
+  border: 1px solid #1e3048;
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+.jp-stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #7a8494; margin-bottom: 6px; }
+.jp-stat-value { font-size: 24px; font-weight: 700; font-family: "JetBrains Mono", monospace; }
+.jp-stat-sub { font-size: 11px; color: #7a8494; margin-top: 4px; }
+.jp-stat-win  .jp-stat-value { color: #4ade80; }
+.jp-stat-loss .jp-stat-value { color: #f87171; }
+
+/* Filters */
+.jp-filters {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  padding: 12px;
+  background: #0a1118;
+  border: 1px solid #1a2332;
+  border-radius: 6px;
+  margin-bottom: 14px;
+}
+.jp-filters label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: #7a8494; }
+.jp-filters select, .jp-filters input {
+  background: #121a24; color: #d6dce5; border: 1px solid #253247;
+  padding: 6px 10px; border-radius: 4px; font-family: inherit; min-width: 110px;
+}
+.jp-reset {
+  margin-left: auto;
+  background: transparent; color: #00d4ff;
+  border: 1px solid #00d4ff55;
+  padding: 7px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;
+}
+.jp-reset:hover { background: #00d4ff15; }
+
+/* Breakdown grids */
+.jp-breakdown {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: #0a1118;
+  border: 1px solid #1a2332;
+  border-radius: 6px;
+}
+.jp-breakdown-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #7a8494; margin-bottom: 8px; }
+.jp-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 6px;
+}
+.jp-bd-tile {
+  display: flex; flex-direction: column; gap: 2px;
+  background: #121a24;
+  border: 1px solid #1e2a3a;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.jp-bd-mk { font-weight: 600; color: #c9d3e3; font-size: 11px; }
+.jp-bd-wl { font-family: "JetBrains Mono", monospace; color: #9aa4b3; font-size: 11px; }
+.jp-bd-wr { font-weight: 600; font-family: "JetBrains Mono", monospace; color: #00d4ff; }
+.jp-bd-r.pos { color: #2ecc71; }
+.jp-bd-r.neg { color: #ff6b6b; }
+
+.jp-list-head { display: flex; justify-content: space-between; margin: 8px 4px; font-size: 12px; color: #7a8494; }
+.jp-loading { color: #00d4ff; }
+
+/* Cards grid — reuses ls-card styling from LiveSignals.css */
+.jp-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
+.jp-card-link { text-decoration: none; color: inherit; display: block; transition: transform 120ms ease, box-shadow 120ms ease; }
+.jp-card-link:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0, 212, 255, 0.12); }
+.jp-card-link:hover .ls-card { border-color: rgba(0, 212, 255, 0.4); }
+.jp-empty { padding: 40px; text-align: center; color: #7a8494; background: #0a1118; border-radius: 6px; }
+
+/* Journal-specific additions on top of .ls-card */
+.jp-trade .jp-card-market {
+  font-size: 11px;
+  font-weight: 700;
+  color: #c9d3e3;
+  background: #121a24;
+  padding: 2px 6px;
+  border-radius: 3px;
+  letter-spacing: 0.03em;
+}
+.jp-trade .jp-card-date {
+  margin-left: auto;
+  font-size: 10px;
+  color: #7a8494;
+  font-family: "JetBrains Mono", monospace;
+  white-space: nowrap;
+}
+
+/* Result strip — shown after levels for closed trades */
+.jp-result-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #1e2a3a;
+  font-size: 11px;
+}
+.jp-result-r,
+.jp-result-pnl {
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 2px 8px;
+  border-radius: 3px;
+}
+.jp-result-r.pos, .jp-result-pnl.pos { color: #4ade80; background: rgba(74, 222, 128, 0.1); }
+.jp-result-r.neg, .jp-result-pnl.neg { color: #f87171; background: rgba(248, 113, 113, 0.1); }
+.jp-result-time, .jp-result-price {
+  font-size: 10px;
+  color: #7a8494;
+  font-family: "JetBrains Mono", monospace;
+}
+.jp-result-price { margin-left: auto; }
+
+/* Pager */
+.jp-pager {
+  display: flex; justify-content: center; align-items: center; gap: 20px;
+  margin-top: 20px; padding: 12px;
+}
+.jp-pager button {
+  background: #121a24; color: #00d4ff; border: 1px solid #253247;
+  padding: 8px 18px; border-radius: 4px; cursor: pointer; font-size: 12px;
+}
+.jp-pager button:hover:not(:disabled) { background: #1a2532; }
+.jp-pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+.jp-pager span { font-size: 12px; color: #9aa4b3; }
+
+/* Lock-alignment badge in trade card header */
+.jp-lock-badge {
+  font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;
+  letter-spacing: 0.3px;
+}
+.jp-lock-with    { background: rgba(0,255,136,.15);  color: #00ff88; }
+.jp-lock-against { background: rgba(255,62,94,.15);  color: #ff3e5e; }
+.jp-lock-none    { background: rgba(148,163,184,.12); color: #94a3b8; }

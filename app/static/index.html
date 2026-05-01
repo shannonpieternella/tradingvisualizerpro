@@ -1,0 +1,1394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Trading Assistant</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:          #040710;
+    --bg2:         #070b16;
+    --bg3:         #0c1220;
+    --bg4:         #111829;
+    --border:      rgba(99, 179, 237, 0.1);
+    --border-hi:   rgba(99, 179, 237, 0.22);
+    --accent:      #4fc3f7;
+    --accent-dim:  #1e88c8;
+    --accent-glow: rgba(79, 195, 247, 0.2);
+    --green:       #00e5a0;
+    --green-glow:  rgba(0, 229, 160, 0.18);
+    --red:         #ff5370;
+    --red-glow:    rgba(255, 83, 112, 0.18);
+    --gold:        #ffd54f;
+    --gold-glow:   rgba(255, 213, 79, 0.18);
+    --text:        #e8edf5;
+    --text-dim:    #8899b4;
+    --text-muted:  #3d4f6b;
+    --panel-w:     420px;
+    --header-h:    54px;
+    --radius:      12px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ════════════════════════════════════════
+     HEADER
+  ════════════════════════════════════════ */
+  header {
+    height: var(--header-h);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 24px;
+    background: linear-gradient(90deg, #060a17 0%, #080d1c 100%);
+    border-bottom: 1px solid var(--border-hi);
+    position: relative;
+    z-index: 20;
+  }
+  header::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg,
+      rgba(79,195,247,0.04) 0%,
+      transparent 40%,
+      rgba(0,229,160,0.03) 100%);
+    pointer-events: none;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .logo-icon {
+    width: 30px; height: 30px;
+    background: linear-gradient(135deg, #1565c0 0%, #00acc1 50%, #00e5a0 100%);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px;
+    box-shadow: 0 0 16px rgba(0, 180, 220, 0.35);
+    flex-shrink: 0;
+  }
+  .logo-text {
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: -0.3px;
+    background: linear-gradient(90deg, #90caf9 0%, #4fc3f7 40%, #00e5a0 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .logo-sub {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--text-muted);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    -webkit-text-fill-color: var(--text-muted);
+  }
+
+  .vdivider {
+    width: 1px;
+    height: 22px;
+    background: var(--border-hi);
+    flex-shrink: 0;
+  }
+
+  #status-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px 4px 8px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--bg3);
+    color: var(--text-muted);
+    transition: all 0.35s ease;
+    letter-spacing: 0.2px;
+  }
+  #status-badge::before {
+    content: '';
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+    transition: box-shadow 0.35s;
+  }
+  #status-badge.ready {
+    color: var(--green);
+    border-color: rgba(0,229,160,0.3);
+    background: rgba(0,229,160,0.06);
+  }
+  #status-badge.ready::before { box-shadow: 0 0 6px var(--green); }
+  #status-badge.error {
+    color: var(--red);
+    border-color: rgba(255,83,112,0.3);
+    background: rgba(255,83,112,0.06);
+  }
+  #status-badge.loading {
+    color: var(--gold);
+    border-color: rgba(255,213,79,0.3);
+    background: rgba(255,213,79,0.06);
+    animation: statusPulse 1.8s ease-in-out infinite;
+  }
+  @keyframes statusPulse { 50% { opacity: 0.55; } }
+
+  #token-badge {
+    font-size: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-muted);
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 3px 9px;
+    transition: all 0.3s;
+  }
+  #token-badge.warn {
+    color: var(--gold);
+    border-color: rgba(255,213,79,0.35);
+    box-shadow: 0 0 10px var(--gold-glow);
+  }
+
+  #chart-info {
+    margin-left: auto;
+    display: flex;
+    gap: 6px;
+  }
+  .ci-chip {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 12px;
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .ci-chip .ci-label {
+    color: var(--text-muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+  }
+  .ci-chip b {
+    color: var(--accent);
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* ════════════════════════════════════════
+     WORKSPACE
+  ════════════════════════════════════════ */
+  .workspace {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── Chart panel ── */
+  .chart-panel {
+    flex: 1;
+    background: #000;
+    position: relative;
+    overflow: hidden;
+  }
+  .chart-panel iframe {
+    width: 100%; height: 100%;
+    border: none; display: block;
+  }
+  #novnc-overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 18px;
+    background: radial-gradient(ellipse at 50% 40%, #0a1428 0%, #040710 100%);
+    z-index: 5;
+    pointer-events: none;
+    transition: opacity 0.6s ease;
+  }
+  #novnc-overlay.hidden { opacity: 0; }
+  .spinner-ring {
+    width: 44px; height: 44px;
+    position: relative;
+  }
+  .spinner-ring::before, .spinner-ring::after {
+    content: '';
+    position: absolute; inset: 0;
+    border-radius: 50%;
+    border: 2px solid transparent;
+  }
+  .spinner-ring::before {
+    border-top-color: var(--accent);
+    animation: spin 1s linear infinite;
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+  .spinner-ring::after {
+    border-bottom-color: var(--green);
+    animation: spin 1.4s linear infinite reverse;
+    opacity: 0.5;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .overlay-text {
+    font-size: 13px;
+    color: var(--text-dim);
+    letter-spacing: 0.3px;
+  }
+
+  /* ════════════════════════════════════════
+     RIGHT PANEL
+  ════════════════════════════════════════ */
+  .right-panel {
+    width: var(--panel-w);
+    min-width: var(--panel-w);
+    background: var(--bg2);
+    border-left: 1px solid var(--border-hi);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Tabs ── */
+  .panel-tabs {
+    display: flex;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border-hi);
+    flex-shrink: 0;
+    padding: 0 8px;
+    gap: 2px;
+  }
+  .tab-btn {
+    flex: 1;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: 'Inter', sans-serif;
+    padding: 14px 8px 12px;
+    cursor: pointer;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    font-size: 10px;
+    transition: all 0.2s;
+    position: relative;
+  }
+  .tab-btn:hover { color: var(--text-dim); }
+  .tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .tab-badge {
+    display: inline-flex;
+    align-items: center; justify-content: center;
+    background: var(--red);
+    color: #fff;
+    border-radius: 10px;
+    font-size: 9px; font-weight: 700;
+    padding: 1px 5px; min-width: 16px;
+    margin-left: 4px;
+    box-shadow: 0 0 8px var(--red-glow);
+  }
+  .tab-badge.hidden { display: none; }
+
+  .tab-pane { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+  .tab-pane.active { display: flex; }
+
+  /* ════════════════════════════════════════
+     CHAT PANE
+  ════════════════════════════════════════ */
+  .chat-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .chat-toolbar h2 {
+    flex: 1;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-muted);
+  }
+  .icon-btn {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 8px;
+    padding: 5px 11px;
+    font-size: 11px;
+    font-family: 'Inter', sans-serif;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    letter-spacing: 0.2px;
+  }
+  .icon-btn:hover {
+    background: rgba(79,195,247,0.1);
+    color: var(--accent);
+    border-color: rgba(79,195,247,0.35);
+    box-shadow: 0 0 12px var(--accent-glow);
+  }
+
+  /* ── Messages ── */
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    scroll-behavior: smooth;
+  }
+  #messages::-webkit-scrollbar { width: 3px; }
+  #messages::-webkit-scrollbar-thumb { background: rgba(79,195,247,0.15); border-radius: 3px; }
+
+  .msg { display: flex; flex-direction: column; gap: 5px; animation: msgIn 0.3s ease; }
+  @keyframes msgIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+
+  .msg-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.9px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding: 0 4px;
+  }
+  .msg.user .msg-label  { color: var(--accent); }
+  .msg.ai .msg-label    { color: var(--green); }
+  .msg.cron .msg-label  { color: var(--gold); }
+
+  .msg-body {
+    padding: 11px 14px;
+    border-radius: var(--radius);
+    line-height: 1.65;
+    word-break: break-word;
+    white-space: pre-wrap;
+    font-size: 13px;
+    border: 1px solid transparent;
+  }
+  .msg.user .msg-body {
+    background: linear-gradient(135deg, rgba(21,101,192,0.25) 0%, rgba(0,172,193,0.12) 100%);
+    border-color: rgba(79,195,247,0.2);
+    border-radius: var(--radius) var(--radius) 4px var(--radius);
+  }
+  .msg.ai .msg-body {
+    background: linear-gradient(135deg, rgba(0,77,64,0.2) 0%, rgba(0,229,160,0.06) 100%);
+    border-color: rgba(0,229,160,0.15);
+    border-radius: var(--radius) var(--radius) var(--radius) 4px;
+  }
+  .msg.status .msg-body {
+    background: none; border: none;
+    color: var(--text-muted); font-style: italic;
+    padding: 1px 4px; font-size: 11px;
+  }
+  .msg.system .msg-body {
+    background: rgba(255,213,79,0.05);
+    border-color: rgba(255,213,79,0.15);
+    color: rgba(255,213,79,0.9);
+    font-size: 12px;
+  }
+  .msg.error .msg-body {
+    background: rgba(255,83,112,0.06);
+    border-color: rgba(255,83,112,0.2);
+    color: var(--red);
+    font-size: 12px;
+  }
+  .msg.cron .msg-body {
+    background: rgba(255,213,79,0.04);
+    border-color: rgba(255,213,79,0.12);
+    font-size: 12px;
+  }
+  .msg.screenshot .msg-body {
+    padding: 5px;
+    background: var(--bg4);
+    border-color: var(--border-hi);
+  }
+  .msg.screenshot img {
+    width: 100%; border-radius: 9px;
+    cursor: zoom-in; display: block;
+    transition: transform 0.2s;
+  }
+  .msg.screenshot img:hover { transform: scale(1.01); }
+  .msg.ai .msg-body code {
+    background: rgba(79,195,247,0.1);
+    border: 1px solid rgba(79,195,247,0.2);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: var(--accent);
+  }
+  .msg.ai .msg-body strong { color: #e8edf5; }
+
+  /* ── Typing indicator ── */
+  #typing-indicator {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-style: italic;
+  }
+  #typing-indicator.active { display: flex; }
+  .dots span {
+    display: inline-block;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: dot 1.3s infinite;
+    box-shadow: 0 0 6px var(--accent-glow);
+  }
+  .dots span:nth-child(2) { animation-delay: .2s; }
+  .dots span:nth-child(3) { animation-delay: .4s; }
+  @keyframes dot { 0%,60%,100%{transform:translateY(0);opacity:.5} 30%{transform:translateY(-5px);opacity:1} }
+
+  /* ── Input area ── */
+  .chat-input-area {
+    padding: 12px 16px 14px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  .quick-cmds {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .qcmd {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    border-radius: 20px;
+    padding: 4px 11px;
+    font-size: 11px;
+    font-family: 'Inter', sans-serif;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+  .qcmd:hover {
+    background: rgba(79,195,247,0.1);
+    color: var(--accent);
+    border-color: rgba(79,195,247,0.4);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+  }
+
+  .input-row { display: flex; gap: 8px; align-items: flex-end; }
+
+  #user-input {
+    flex: 1;
+    background: var(--bg4);
+    border: 1px solid var(--border-hi);
+    border-radius: 12px;
+    color: var(--text);
+    padding: 10px 14px;
+    font-size: 13px;
+    font-family: 'Inter', sans-serif;
+    resize: none;
+    outline: none;
+    min-height: 42px;
+    max-height: 110px;
+    line-height: 1.5;
+    transition: all 0.25s;
+  }
+  #user-input:focus {
+    border-color: rgba(79,195,247,0.5);
+    background: var(--bg3);
+    box-shadow: 0 0 0 3px rgba(79,195,247,0.07), 0 0 20px rgba(79,195,247,0.06);
+  }
+  #user-input::placeholder { color: var(--text-muted); }
+  #user-input:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  #send-btn {
+    width: 42px; height: 42px;
+    border: none; border-radius: 12px;
+    background: linear-gradient(135deg, #1565c0 0%, #0097b2 50%, #00bfa5 100%);
+    color: #fff;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    transition: all 0.2s;
+    box-shadow: 0 4px 16px rgba(0,150,200,0.3);
+  }
+  #send-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 24px rgba(0,180,220,0.45);
+    background: linear-gradient(135deg, #1976d2 0%, #00acc1 50%, #00c9aa 100%);
+  }
+  #send-btn:active { transform: translateY(0); }
+  #send-btn:disabled { background: var(--bg4); box-shadow: none; cursor: not-allowed; opacity: 0.5; }
+  #send-btn svg { width: 17px; height: 17px; fill: currentColor; }
+
+  #stop-btn {
+    width: 42px; height: 42px;
+    border: 1px solid rgba(255,83,112,0.3);
+    border-radius: 12px;
+    background: rgba(255,83,112,0.08);
+    color: var(--red);
+    cursor: pointer;
+    display: none; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    font-size: 14px;
+    transition: all 0.2s;
+  }
+  #stop-btn:hover {
+    background: rgba(255,83,112,0.18);
+    box-shadow: 0 0 16px var(--red-glow);
+    border-color: rgba(255,83,112,0.55);
+  }
+  #stop-btn.active { display: flex; }
+
+  .hint { font-size: 10px; color: var(--text-muted); text-align: right; }
+
+  /* ════════════════════════════════════════
+     MEMORY PANE
+  ════════════════════════════════════════ */
+  .pane-inner {
+    flex: 1; display: flex; flex-direction: column;
+    overflow: hidden; padding: 16px; gap: 10px;
+  }
+  .pane-header {
+    display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+  }
+  .pane-header h3 {
+    flex: 1;
+    font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.7px;
+    color: var(--text-muted);
+  }
+  select.file-select {
+    flex: 1;
+    background: var(--bg4);
+    border: 1px solid var(--border-hi);
+    border-radius: 9px;
+    color: var(--text);
+    padding: 7px 32px 7px 11px;
+    font-size: 12px; font-family: 'Inter', sans-serif;
+    outline: none; cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%233d4f6b' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    transition: border-color 0.2s;
+  }
+  select.file-select:focus { border-color: rgba(79,195,247,0.4); }
+  textarea.file-editor {
+    flex: 1;
+    background: var(--bg4);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    color: var(--text);
+    padding: 12px;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    resize: none; outline: none;
+    line-height: 1.65; min-height: 0;
+    transition: border-color 0.2s;
+  }
+  textarea.file-editor:focus { border-color: rgba(79,195,247,0.35); }
+
+  /* ════════════════════════════════════════
+     BUTTONS
+  ════════════════════════════════════════ */
+  .btn {
+    background: var(--bg4);
+    border: 1px solid var(--border-hi);
+    border-radius: 9px;
+    color: var(--text-dim);
+    padding: 7px 15px;
+    font-size: 12px; font-family: 'Inter', sans-serif; font-weight: 500;
+    cursor: pointer; transition: all 0.2s; white-space: nowrap;
+  }
+  .btn:hover {
+    background: rgba(79,195,247,0.08);
+    border-color: rgba(79,195,247,0.35);
+    color: var(--accent);
+    box-shadow: 0 0 12px rgba(79,195,247,0.1);
+  }
+  .btn.btn-sm { padding: 5px 11px; font-size: 11px; }
+  .btn.btn-green {
+    border-color: rgba(0,229,160,0.25);
+    color: var(--green);
+  }
+  .btn.btn-green:hover {
+    background: rgba(0,229,160,0.08);
+    border-color: rgba(0,229,160,0.45);
+    box-shadow: 0 0 12px var(--green-glow);
+  }
+  .btn.btn-red { border-color: rgba(255,83,112,0.25); color: var(--red); }
+  .btn.btn-red:hover {
+    background: rgba(255,83,112,0.08);
+    border-color: rgba(255,83,112,0.45);
+    box-shadow: 0 0 12px var(--red-glow);
+  }
+  .btn.btn-primary {
+    background: linear-gradient(135deg, #1565c0 0%, #00acc1 100%);
+    border-color: transparent; color: #fff;
+    box-shadow: 0 2px 12px rgba(0,140,200,0.25);
+  }
+  .btn.btn-primary:hover {
+    background: linear-gradient(135deg, #1976d2 0%, #00bcd4 100%);
+    box-shadow: 0 4px 20px rgba(0,170,220,0.4);
+    color: #fff; transform: translateY(-1px);
+  }
+
+  #mem-status { font-size: 11px; color: var(--text-muted); font-style: italic; min-height: 16px; }
+
+  /* ════════════════════════════════════════
+     CRON PANE
+  ════════════════════════════════════════ */
+  .cron-toolbar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .cron-toolbar h3 {
+    flex: 1; font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.7px; color: var(--text-muted);
+  }
+
+  #job-list {
+    flex: 1; overflow-y: auto;
+    padding: 12px 16px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  #job-list::-webkit-scrollbar { width: 3px; }
+  #job-list::-webkit-scrollbar-thumb { background: rgba(79,195,247,0.15); border-radius: 3px; }
+
+  .job-card {
+    background: var(--bg3);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    display: flex; flex-direction: column; gap: 8px;
+    animation: msgIn 0.25s ease;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .job-card:hover { border-color: var(--border-hi); box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+  .job-card.inactive { opacity: 0.35; }
+  .job-card-top { display: flex; align-items: center; gap: 8px; }
+  .job-name { font-weight: 600; font-size: 13px; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job-schedule {
+    font-size: 10px; color: var(--accent);
+    background: rgba(79,195,247,0.08);
+    border: 1px solid rgba(79,195,247,0.2);
+    border-radius: 6px; padding: 2px 8px;
+    font-family: 'JetBrains Mono', monospace; white-space: nowrap;
+  }
+  .job-prompt { font-size: 11px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job-meta { font-size: 10px; color: var(--text-muted); }
+  .job-actions { display: flex; gap: 6px; }
+
+  /* Toggle */
+  .toggle { position: relative; display: inline-block; width: 34px; height: 19px; flex-shrink: 0; }
+  .toggle input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0;
+    background: var(--bg4);
+    border: 1px solid var(--border-hi);
+    border-radius: 19px;
+    cursor: pointer;
+    transition: 0.25s;
+  }
+  .slider::before {
+    content: ''; position: absolute;
+    width: 13px; height: 13px;
+    left: 2px; bottom: 2px;
+    background: var(--text-muted);
+    border-radius: 50%;
+    transition: 0.25s;
+  }
+  .toggle input:checked + .slider {
+    background: rgba(0,229,160,0.12);
+    border-color: rgba(0,229,160,0.4);
+    box-shadow: 0 0 10px var(--green-glow);
+  }
+  .toggle input:checked + .slider::before {
+    background: var(--green);
+    transform: translateX(15px);
+    box-shadow: 0 0 6px rgba(0,229,160,0.6);
+  }
+
+  /* Add form */
+  #add-job-form {
+    border-top: 1px solid var(--border);
+    padding: 16px;
+    display: flex; flex-direction: column; gap: 10px;
+    flex-shrink: 0; background: var(--bg);
+  }
+  #add-job-form.hidden { display: none; }
+  .form-row { display: flex; flex-direction: column; gap: 5px; }
+  .form-row label {
+    font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.6px;
+    color: var(--text-muted);
+  }
+  .form-row input,
+  .form-row textarea,
+  .form-row select {
+    background: var(--bg4);
+    border: 1px solid var(--border-hi);
+    border-radius: 9px;
+    color: var(--text);
+    padding: 8px 11px;
+    font-size: 12px; font-family: 'Inter', sans-serif;
+    outline: none; transition: border-color 0.2s;
+  }
+  .form-row input:focus,
+  .form-row textarea:focus,
+  .form-row select:focus { border-color: rgba(79,195,247,0.4); box-shadow: 0 0 0 3px rgba(79,195,247,0.06); }
+  .form-row textarea { resize: vertical; min-height: 60px; }
+  .form-btns { display: flex; gap: 8px; justify-content: flex-end; }
+  .hidden { display: none !important; }
+  .empty-state { color: var(--text-muted); font-size: 12px; text-align: center; padding: 40px 0; font-style: italic; }
+
+  /* ════════════════════════════════════════
+     TOASTS
+  ════════════════════════════════════════ */
+  #toast-container {
+    position: fixed; top: 62px; right: 16px;
+    display: flex; flex-direction: column; gap: 8px;
+    z-index: 9999; pointer-events: none; max-width: 300px;
+  }
+  .toast {
+    background: rgba(7,11,22,0.95);
+    backdrop-filter: blur(16px) saturate(1.5);
+    border: 1px solid var(--border-hi);
+    border-radius: 12px;
+    padding: 13px 16px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    animation: toastIn 0.3s cubic-bezier(0.34,1.56,0.64,1);
+    pointer-events: auto; cursor: pointer;
+  }
+  .toast.toast-alert  { border-left: 3px solid var(--green); box-shadow: 0 8px 32px rgba(0,0,0,0.5), -3px 0 16px var(--green-glow); }
+  .toast.toast-info   { border-left: 3px solid var(--accent); box-shadow: 0 8px 32px rgba(0,0,0,0.5), -3px 0 16px var(--accent-glow); }
+  .toast.toast-error  { border-left: 3px solid var(--red); box-shadow: 0 8px 32px rgba(0,0,0,0.5), -3px 0 16px var(--red-glow); }
+  .toast.fade-out { animation: toastOut 0.3s ease forwards; }
+  @keyframes toastIn { from { opacity:0; transform:translateX(20px) scale(0.95); } to { opacity:1; transform:none; } }
+  @keyframes toastOut { to { opacity:0; transform:translateX(16px); } }
+  .toast-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+  .toast-body { font-size: 11px; color: var(--text-dim); line-height: 1.5; max-height: 56px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+
+  /* ════════════════════════════════════════
+     LIGHTBOX
+  ════════════════════════════════════════ */
+  #lightbox {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.93);
+    backdrop-filter: blur(6px);
+    z-index: 10000;
+    align-items: center; justify-content: center;
+    cursor: zoom-out;
+  }
+  #lightbox.open { display: flex; }
+  #lightbox img {
+    max-width: 95vw; max-height: 95vh;
+    border-radius: 12px;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.8), 0 0 60px rgba(79,195,247,0.08);
+    animation: lbIn 0.22s ease;
+  }
+  @keyframes lbIn { from { opacity:0; transform:scale(0.88); } to { opacity:1; transform:none; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">📈</div>
+    <div>
+      <div class="logo-text">AI Trading Assistant</div>
+      <div class="logo-sub">Powered by Claude</div>
+    </div>
+  </div>
+  <div class="vdivider"></div>
+  <div id="status-badge" class="loading">Connecting</div>
+  <div id="token-badge" title="Estimated input tokens sent to Claude API">0 tk</div>
+  <div id="chart-info">
+    <div class="ci-chip">
+      <span class="ci-label">Symbol</span>
+      <b id="ci-symbol">—</b>
+    </div>
+    <div class="ci-chip">
+      <span class="ci-label">TF</span>
+      <b id="ci-tf">—</b>
+    </div>
+    <div class="ci-chip">
+      <span class="ci-label">TZ</span>
+      <b id="ci-tz">—</b>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+
+  <div class="chart-panel">
+    <div id="novnc-overlay">
+      <div class="spinner-ring"></div>
+      <div class="overlay-text">Loading chart stream…</div>
+    </div>
+    <iframe id="novnc-frame" allowfullscreen></iframe>
+  </div>
+
+  <div class="right-panel">
+
+    <div class="panel-tabs">
+      <button class="tab-btn active" id="btn-tab-chat"   onclick="switchTab('chat')">Chat</button>
+      <button class="tab-btn"        id="btn-tab-memory" onclick="switchTab('memory')">Memory</button>
+      <button class="tab-btn"        id="btn-tab-cron"   onclick="switchTab('cron')">
+        Cron <span id="cron-badge" class="tab-badge hidden">0</span>
+      </button>
+    </div>
+
+    <!-- Chat pane -->
+    <div class="tab-pane active" id="pane-chat">
+      <div class="chat-toolbar">
+        <h2>Conversation</h2>
+        <button class="icon-btn" onclick="clearChat()">⊘ Clear</button>
+        <button class="icon-btn" onclick="takeScreenshot()">📷 Snap</button>
+      </div>
+
+      <div id="messages"></div>
+
+      <div id="typing-indicator">
+        <div class="dots"><span></span><span></span><span></span></div>
+        Claude is analyzing…
+      </div>
+
+      <div class="chat-input-area">
+        <div class="quick-cmds">
+          <span class="qcmd" onclick="quickSend('Take a screenshot')">📷 Screenshot</span>
+          <span class="qcmd" onclick="quickSend('What symbol and timeframe is currently shown?')">📊 Status</span>
+          <span class="qcmd" onclick="quickSend('Auto scale the chart')">⟺ Auto scale</span>
+          <span class="qcmd" onclick="quickSend('Reset zoom')">🔄 Reset zoom</span>
+          <span class="qcmd" onclick="quickSend('Get the last 20 bars of OHLCV data')">📋 Bar data</span>
+        </div>
+        <div class="input-row">
+          <textarea id="user-input"
+                    placeholder="Ask anything about the chart…"
+                    rows="1"
+                    onkeydown="handleKey(event)"
+                    oninput="autoResize(this)"></textarea>
+          <button id="stop-btn" onclick="abortAgent()" title="Stop">■</button>
+          <button id="send-btn" onclick="sendMessage()" title="Send (Enter)">
+            <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+          </button>
+        </div>
+        <div class="hint">Enter to send · Shift+Enter for newline</div>
+      </div>
+    </div>
+
+    <!-- Memory pane -->
+    <div class="tab-pane" id="pane-memory">
+      <div class="pane-inner">
+        <div class="pane-header">
+          <h3>Memory Files</h3>
+          <button class="btn btn-sm" onclick="loadMemoryFiles()">↻ Refresh</button>
+        </div>
+        <div style="display:flex; gap:6px; flex-shrink:0;">
+          <select id="mem-file-select" class="file-select" onchange="loadMemoryFile(this.value)">
+            <option value="">— select file —</option>
+          </select>
+        </div>
+        <textarea id="mem-editor" class="file-editor" placeholder="Select a file above to view or edit…"></textarea>
+        <div style="display:flex; gap:6px; align-items:center; flex-shrink:0;">
+          <div id="mem-status"></div>
+          <div style="flex:1"></div>
+          <button class="btn btn-sm" onclick="newMemoryFile()">+ New</button>
+          <button class="btn btn-sm btn-green" onclick="saveMemoryFile()">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cron pane -->
+    <div class="tab-pane" id="pane-cron">
+      <div class="cron-toolbar">
+        <h3>Scheduled Jobs</h3>
+        <button class="btn btn-sm" onclick="loadCronJobs()">↻ Refresh</button>
+        <button class="btn btn-sm btn-green" onclick="toggleAddForm()">+ Add</button>
+      </div>
+
+      <div id="job-list">
+        <div class="empty-state" id="jobs-empty">No scheduled jobs yet.</div>
+      </div>
+
+      <div id="add-job-form" class="hidden">
+        <div class="form-row">
+          <label>Job Name</label>
+          <input id="new-job-name" type="text" placeholder="e.g. Morning scan NAS100">
+        </div>
+        <div class="form-row">
+          <label>Prompt (sent to Claude)</label>
+          <textarea id="new-job-message" placeholder="e.g. Check NAS100 5m chart for breakout patterns."></textarea>
+        </div>
+        <div class="form-row">
+          <label>Schedule Type</label>
+          <select id="new-job-type" onchange="updateScheduleFields()">
+            <option value="interval">Interval (every N minutes)</option>
+            <option value="cron">Cron expression</option>
+          </select>
+        </div>
+        <div class="form-row" id="field-interval">
+          <label>Interval (minutes)</label>
+          <input id="new-job-interval" type="number" value="15" min="1">
+        </div>
+        <div class="form-row hidden" id="field-cron">
+          <label>Cron expression (ET timezone)</label>
+          <input id="new-job-cron" type="text" placeholder="e.g. 30 9 * * 1-5">
+        </div>
+        <div class="form-btns">
+          <button class="btn btn-sm" onclick="toggleAddForm()">Cancel</button>
+          <button class="btn btn-sm btn-primary" onclick="addCronJob()">Save Job</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<div id="toast-container"></div>
+<div id="lightbox" onclick="closeLightbox()">
+  <img id="lightbox-img" src="" alt="Screenshot">
+</div>
+
+<script>
+let ws, wsReady = false, reconnectTimer = null;
+
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => {
+    wsReady = true;
+    clearTimeout(reconnectTimer);
+    updateStatus('ready', 'Connected');
+    fetchStatus();
+  };
+  ws.onclose = () => {
+    wsReady = false;
+    updateStatus('error', 'Disconnected');
+    reconnectTimer = setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => { wsReady = false; updateStatus('error', 'WS Error'); };
+  ws.onmessage = (e) => handleServerMsg(JSON.parse(e.data));
+}
+function sendRaw(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+setInterval(() => { if (wsReady) sendRaw({type:'ping'}); }, 20000);
+
+function updateStatus(cls, text) {
+  const el = document.getElementById('status-badge');
+  el.className = cls; el.textContent = text;
+}
+async function fetchStatus() {
+  try {
+    const d = await fetch('/api/status').then(r => r.json());
+    if (d.status === 'ready') {
+      document.getElementById('ci-symbol').textContent = d.symbol || '—';
+      document.getElementById('ci-tf').textContent     = d.timeframe || '—';
+      document.getElementById('ci-tz').textContent     = (d.timezone||'').replace('America/New_York','NY') || '—';
+      updateStatus('ready', 'Ready');
+    }
+  } catch {}
+}
+setInterval(fetchStatus, 15000);
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+  document.getElementById(`btn-tab-${name}`).classList.add('active');
+  document.getElementById(`pane-${name}`).classList.add('active');
+  if (name === 'memory') loadMemoryFiles();
+  if (name === 'cron') { loadCronJobs(); clearCronBadge(); }
+}
+
+function initNoVNC() {
+  const frame = document.getElementById('novnc-frame');
+  const overlay = document.getElementById('novnc-overlay');
+  frame.src = `${location.protocol}//${location.host}/novnc/vnc.html`
+            + `?autoconnect=1&reconnect=1&reconnect_delay=2000`
+            + `&path=novnc/&quality=6&compression=2`
+            + `&show_dot=false&bell=false&resize=scale`;
+  frame.onload = () => setTimeout(() => overlay.classList.add('hidden'), 1500);
+}
+
+const messagesEl = document.getElementById('messages');
+const typingEl   = document.getElementById('typing-indicator');
+let   currentAiMsg = null;
+
+function escapeHtml(t) {
+  return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function renderText(txt) {
+  return escapeHtml(txt)
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/\n/g,'<br>');
+}
+function appendMsg(type, content) {
+  const wrapper = document.createElement('div');
+  wrapper.className = `msg ${type}`;
+  if (type === 'user' || type === 'ai' || type === 'cron') {
+    const lbl = document.createElement('div');
+    lbl.className = 'msg-label';
+    lbl.textContent = type === 'user' ? 'You' : type === 'cron' ? 'Cron Alert' : 'Claude';
+    wrapper.appendChild(lbl);
+  }
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  body.innerHTML = renderText(content);
+  wrapper.appendChild(body);
+  messagesEl.appendChild(wrapper);
+  scrollBottom();
+  return wrapper;
+}
+function appendScreenshot(b64) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'msg screenshot';
+  const lbl = document.createElement('div');
+  lbl.className = 'msg-label';
+  lbl.textContent = 'Screenshot';
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  const img = document.createElement('img');
+  img.src = `data:image/jpeg;base64,${b64}`;
+  img.alt = 'Chart screenshot';
+  img.onclick = () => openLightbox(img.src);
+  body.appendChild(img);
+  wrapper.appendChild(lbl);
+  wrapper.appendChild(body);
+  messagesEl.appendChild(wrapper);
+  scrollBottom();
+}
+function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+function updateTokenBadge(content) {
+  const badge = document.getElementById('token-badge');
+  badge.textContent = content;
+  badge.className = (parseInt(content.replace(/\D/g,''),10)||0) > 15000 ? 'warn' : '';
+}
+
+function showToast(title, body, type = 'info', onClick) {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `<div class="toast-title">${escapeHtml(title)}</div><div class="toast-body">${escapeHtml(body)}</div>`;
+  if (onClick) toast.onclick = onClick;
+  container.appendChild(toast);
+  const timer = setTimeout(() => dismissToast(toast), 7000);
+  toast.addEventListener('click', () => { clearTimeout(timer); dismissToast(toast); });
+}
+function dismissToast(toast) {
+  toast.classList.add('fade-out');
+  setTimeout(() => toast.remove(), 350);
+}
+
+let cronAlertCount = 0;
+function bumpCronBadge() {
+  const active = document.querySelector('.tab-pane.active');
+  if (active && active.id === 'pane-cron') return;
+  cronAlertCount++;
+  const badge = document.getElementById('cron-badge');
+  badge.textContent = cronAlertCount;
+  badge.classList.remove('hidden');
+}
+function clearCronBadge() {
+  cronAlertCount = 0;
+  const badge = document.getElementById('cron-badge');
+  badge.textContent = '0';
+  badge.classList.add('hidden');
+}
+
+function handleServerMsg(msg) {
+  switch (msg.type) {
+    case 'text':
+      if (!currentAiMsg) {
+        currentAiMsg = appendMsg('ai', msg.content);
+      } else {
+        currentAiMsg.querySelector('.msg-body').innerHTML += renderText(msg.content);
+        scrollBottom();
+      }
+      break;
+    case 'screenshot':
+      appendScreenshot(msg.data);
+      setTimeout(fetchStatus, 500);
+      break;
+    case 'status':  appendMsg('status', msg.content); break;
+    case 'debug':   updateTokenBadge(msg.content); break;
+    case 'error':
+      appendMsg('error', msg.content);
+      setThinking(false); currentAiMsg = null; enableInput(true);
+      break;
+    case 'system':  appendMsg('system', msg.content); break;
+    case 'done':
+      setThinking(false); currentAiMsg = null; enableInput(true); fetchStatus();
+      break;
+    case 'pong': break;
+    case 'cron_running':
+      appendMsg('status', `Cron job started: ${msg.job_name}`);
+      break;
+    case 'cron_alert':
+      appendMsg('cron', `[${msg.timestamp}] ${msg.job_name}\n${msg.content}`);
+      showToast(`Cron: ${msg.job_name}`, msg.content, 'alert', () => switchTab('cron'));
+      bumpCronBadge();
+      if (document.getElementById('pane-cron').classList.contains('active')) loadCronJobs();
+      break;
+    case 'cron_screenshot': {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'msg screenshot';
+      const lbl = document.createElement('div');
+      lbl.className = 'msg-label';
+      lbl.textContent = `Cron: ${msg.job_name}`;
+      const body = document.createElement('div');
+      body.className = 'msg-body';
+      const img = document.createElement('img');
+      img.src = `data:image/jpeg;base64,${msg.data}`;
+      img.onclick = () => openLightbox(img.src);
+      body.appendChild(img);
+      wrapper.appendChild(lbl);
+      wrapper.appendChild(body);
+      messagesEl.appendChild(wrapper);
+      scrollBottom();
+      bumpCronBadge();
+      break;
+    }
+    case 'cron_error':
+      appendMsg('error', `Cron error [${msg.job_name}]: ${msg.content}`);
+      showToast(`Cron error: ${msg.job_name}`, msg.content, 'error');
+      bumpCronBadge();
+      break;
+  }
+}
+
+function sendMessage() {
+  const inp = document.getElementById('user-input');
+  const text = inp.value.trim();
+  if (!text || !wsReady) return;
+  appendMsg('user', text);
+  inp.value = ''; autoResize(inp);
+  enableInput(false); setThinking(true); currentAiMsg = null;
+  sendRaw({type:'message', content:text});
+}
+function quickSend(text) {
+  document.getElementById('user-input').value = text;
+  sendMessage();
+}
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+}
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 110) + 'px';
+}
+function enableInput(v) {
+  document.getElementById('user-input').disabled = !v;
+  document.getElementById('send-btn').disabled = !v;
+}
+function setThinking(v) {
+  typingEl.classList.toggle('active', v);
+  document.getElementById('stop-btn').classList.toggle('active', v);
+  scrollBottom();
+}
+function abortAgent() {
+  sendRaw({type:'abort'}); setThinking(false); enableInput(true); currentAiMsg = null;
+}
+function clearChat() {
+  sendRaw({type:'clear'});
+  while (messagesEl.children.length > 0) messagesEl.removeChild(messagesEl.lastChild);
+  currentAiMsg = null;
+}
+function takeScreenshot() { quickSend('Take a screenshot of the current chart'); }
+
+function openLightbox(src) {
+  document.getElementById('lightbox-img').src = src;
+  document.getElementById('lightbox').classList.add('open');
+}
+function closeLightbox() { document.getElementById('lightbox').classList.remove('open'); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+
+async function loadMemoryFiles() {
+  try {
+    const d = await fetch('/api/memory/files').then(r => r.json());
+    const sel = document.getElementById('mem-file-select');
+    const current = sel.value;
+    sel.innerHTML = '<option value="">— select file —</option>';
+    (d.files||[]).forEach(f => {
+      const o = document.createElement('option');
+      o.value = f; o.textContent = f;
+      if (f === current) o.selected = true;
+      sel.appendChild(o);
+    });
+  } catch(e) { setMemStatus('Error: '+e, true); }
+}
+async function loadMemoryFile(filename) {
+  if (!filename) { document.getElementById('mem-editor').value=''; setMemStatus(''); return; }
+  setMemStatus('Loading…');
+  try {
+    const d = await fetch(`/api/memory/file?filename=${encodeURIComponent(filename)}`).then(r=>r.json());
+    document.getElementById('mem-editor').value = d.content||'';
+    setMemStatus(`Loaded: ${filename}`);
+  } catch(e) { setMemStatus('Error: '+e, true); }
+}
+async function saveMemoryFile() {
+  const sel = document.getElementById('mem-file-select');
+  const filename = sel.value;
+  if (!filename) { setMemStatus('Select a file first.', true); return; }
+  const content = document.getElementById('mem-editor').value;
+  setMemStatus('Saving…');
+  try {
+    const d = await fetch('/api/memory/file', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({filename, content}),
+    }).then(r=>r.json());
+    setMemStatus(d.result||'Saved.');
+  } catch(e) { setMemStatus('Error: '+e, true); }
+}
+function newMemoryFile() {
+  const name = prompt('File name (e.g. STRATEGIES.md):');
+  if (!name) return;
+  const sel = document.getElementById('mem-file-select');
+  let found = false;
+  for (const o of sel.options) { if (o.value === name) { found=true; break; } }
+  if (!found) {
+    const o = document.createElement('option');
+    o.value = name; o.textContent = name; sel.appendChild(o);
+  }
+  sel.value = name;
+  document.getElementById('mem-editor').value = '';
+  setMemStatus(`New file: ${name} (unsaved)`);
+}
+function setMemStatus(msg, isErr=false) {
+  const el = document.getElementById('mem-status');
+  el.textContent = msg;
+  el.style.color = isErr ? 'var(--red)' : 'var(--text-muted)';
+}
+
+async function loadCronJobs() {
+  try {
+    const d = await fetch('/api/cron/jobs').then(r=>r.json());
+    renderJobList(d.jobs||[]);
+  } catch(e) { console.error(e); }
+}
+function renderJobList(jobs) {
+  const list = document.getElementById('job-list');
+  const empty = document.getElementById('jobs-empty');
+  Array.from(list.children).forEach(c => { if (c.id !== 'jobs-empty') c.remove(); });
+  if (!jobs.length) { empty.style.display='block'; return; }
+  empty.style.display = 'none';
+  jobs.forEach(job => {
+    const card = document.createElement('div');
+    card.className = `job-card ${job.active?'':'inactive'}`;
+    card.id = `job-${job.id}`;
+    const schedLabel = job.type==='cron' ? job.cron : `every ${job.interval_minutes}m`;
+    const lastRun = job.last_run
+      ? new Date(job.last_run).toLocaleTimeString('nl-NL',{hour:'2-digit',minute:'2-digit'})
+      : 'never';
+    card.innerHTML = `
+      <div class="job-card-top">
+        <label class="toggle" title="${job.active?'Disable':'Enable'} job">
+          <input type="checkbox" ${job.active?'checked':''} onchange="toggleCronJob('${job.id}',this)">
+          <span class="slider"></span>
+        </label>
+        <span class="job-name" title="${escapeHtml(job.name)}">${escapeHtml(job.name)}</span>
+        <span class="job-schedule">${escapeHtml(schedLabel)}</span>
+      </div>
+      <div class="job-prompt" title="${escapeHtml(job.message)}">${escapeHtml(job.message)}</div>
+      <div class="job-meta">Last run: ${lastRun} &nbsp;·&nbsp; Runs: ${job.run_count||0}</div>
+      <div class="job-actions">
+        <button class="btn btn-sm" onclick="runCronJobNow('${job.id}')">▶ Run now</button>
+        <button class="btn btn-sm btn-red" onclick="deleteCronJob('${job.id}')">Delete</button>
+      </div>`;
+    list.appendChild(card);
+  });
+}
+async function toggleCronJob(id, checkbox) {
+  try {
+    const d = await fetch(`/api/cron/jobs/${id}/toggle`,{method:'POST'}).then(r=>r.json());
+    const card = document.getElementById(`job-${id}`);
+    if (card) card.classList.toggle('inactive', !d.job.active);
+  } catch { checkbox.checked = !checkbox.checked; }
+}
+async function runCronJobNow(id) {
+  await fetch(`/api/cron/jobs/${id}/run`,{method:'POST'});
+  appendMsg('status','Running cron job now…');
+  switchTab('chat');
+}
+async function deleteCronJob(id) {
+  if (!confirm('Delete this scheduled job?')) return;
+  await fetch(`/api/cron/jobs/${id}`,{method:'DELETE'});
+  loadCronJobs();
+}
+function toggleAddForm() {
+  const form = document.getElementById('add-job-form');
+  form.classList.toggle('hidden');
+  if (!form.classList.contains('hidden')) document.getElementById('new-job-name').focus();
+}
+function updateScheduleFields() {
+  const type = document.getElementById('new-job-type').value;
+  document.getElementById('field-interval').classList.toggle('hidden', type!=='interval');
+  document.getElementById('field-cron').classList.toggle('hidden', type!=='cron');
+}
+async function addCronJob() {
+  const name       = document.getElementById('new-job-name').value.trim();
+  const message    = document.getElementById('new-job-message').value.trim();
+  const type       = document.getElementById('new-job-type').value;
+  const intervalMin= parseInt(document.getElementById('new-job-interval').value,10)||15;
+  const cronExpr   = document.getElementById('new-job-cron').value.trim();
+  if (!name||!message) { alert('Name and prompt are required.'); return; }
+  if (type==='cron'&&!cronExpr) { alert('Please enter a cron expression.'); return; }
+  const body = {name,message,type};
+  if (type==='interval') body.interval_minutes=intervalMin;
+  if (type==='cron') body.cron=cronExpr;
+  try {
+    const d = await fetch('/api/cron/jobs',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body),
+    }).then(r=>r.json());
+    if (d.job) {
+      toggleAddForm();
+      document.getElementById('new-job-name').value='';
+      document.getElementById('new-job-message').value='';
+      document.getElementById('new-job-interval').value='15';
+      document.getElementById('new-job-cron').value='';
+      loadCronJobs();
+      showToast('Job added',`"${name}" scheduled.`,'info');
+    } else { alert('Error: '+JSON.stringify(d)); }
+  } catch(e) { alert('Error: '+e); }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  connectWS();
+  initNoVNC();
+  document.getElementById('user-input').focus();
+});
+</script>
+</body>
+</html>
