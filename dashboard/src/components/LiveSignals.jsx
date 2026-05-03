@@ -99,7 +99,34 @@ function OutcomeBadge({ outcome }) {
   return null;
 }
 
-function SignalCard({ label, sig, market, activeSetup, currentPrice, hasPinnedActive = false, hasRecentClose = null }) {
+// Premium / Discount zone tag — small badge shown next to step-1 and step-2
+// sweep prices on the card. Aligned with the setup direction (BUY=discount,
+// SELL=premium) renders green; mis-aligned renders red. Falls back to neutral
+// when daily/6H eq aren't available yet (early in a session).
+function ZoneTag({ price, dailyEq, sixHEq, direction }) {
+  if (price == null || (dailyEq == null && sixHEq == null)) return null;
+  const zoneOf = (eq) => eq == null ? null : (price < eq ? "DISCOUNT" : "PREMIUM");
+  const dZone = zoneOf(dailyEq);
+  const hZone = zoneOf(sixHEq);
+  const same  = dZone && hZone && dZone === hZone;
+  const primary = same ? dZone : (dZone ?? hZone);
+  if (!primary) return null;
+  const aligned = direction === "BUY"
+    ? primary === "DISCOUNT"
+    : direction === "SELL"
+      ? primary === "PREMIUM"
+      : false;
+  const cls = `ls-zone-tag ls-zone-${primary === "DISCOUNT" ? "d" : "p"} ${aligned ? "ls-zone-aligned" : ""}`;
+  const label = primary === "DISCOUNT" ? "💧 DISC" : "🔥 PREM";
+  const mixed = dZone && hZone && dZone !== hZone;
+  return (
+    <span className={cls} title={`Daily: ${dZone ?? "?"} | 6H: ${hZone ?? "?"}`}>
+      {label}{mixed ? " ⚠" : ""}
+    </span>
+  );
+}
+
+function SignalCard({ label, sig, market, activeSetup, currentPrice, dailyEq = null, sixHEq = null, hasPinnedActive = false, hasRecentClose = null }) {
   if (!sig) return null;
 
   const isBuy    = sig.type === "BUY";
@@ -196,6 +223,12 @@ function SignalCard({ label, sig, market, activeSetup, currentPrice, hasPinnedAc
             {isBuy ? <>{label} BSL <b>{fp(effBslLevel)}</b></> : <>{label} SSL <b>{fp(effSslLevel)}</b></>}
             {effStep1Time && <span className="ls-step-time"> @ {effStep1Time}</span>}
             {effStep1CycleLabel && <span className="ls-step-cycle"> [{effStep1CycleLabel}]</span>}
+            {bslDone && (
+              <ZoneTag
+                price={isBuy ? effBslLevel : effSslLevel}
+                dailyEq={dailyEq} sixHEq={sixHEq} direction={sig.type}
+              />
+            )}
           </span>
         </div>
         <div className={`ls-step ${sslDone ? "ls-step-done" : "ls-step-wait"}`}>
@@ -207,6 +240,12 @@ function SignalCard({ label, sig, market, activeSetup, currentPrice, hasPinnedAc
             }
             {effStep2Time && <span className="ls-step-time"> @ {effStep2Time}</span>}
             {effCycleLabel && <span className="ls-step-cycle"> [{effCycleLabel}]</span>}
+            {sslDone && (
+              <ZoneTag
+                price={setup?.sweepPrice ?? (isBuy ? effSslLevel : effBslLevel)}
+                dailyEq={dailyEq} sixHEq={sixHEq} direction={sig.type}
+              />
+            )}
           </span>
         </div>
         <div className={`ls-step ${(isActive || isLive || entryWindowOpen) ? "ls-step-done" : "ls-step-wait"}`}>
@@ -821,6 +860,18 @@ function MarketBlock({ market, liveData }) {
   const currentPrice = md?.currentPrice ?? null;
   const allowed      = md?.allowedDirection ?? null;
 
+  // Daily + 6H equilibrium for the per-step ZoneTag rendered on each card.
+  // Daily eq = today's running high+low / 2 (from the isToday entry monitor.js
+  // continuously updates from 18:00 ET). 6H eq = currently-active 6H cycle's
+  // running range; falls back to the most recent completed 6H if no active.
+  const _today  = (md?.dailyLevels ?? []).find(d => d?.isToday);
+  const dailyEq = (_today && _today.high != null && _today.low != null)
+    ? (_today.high + _today.low) / 2
+    : null;
+  const _activeSixH = (md?.cycles6H ?? []).find(c => c?.status === "active" && c.high != null && c.low != null)
+    ?? [...(md?.cycles6H ?? [])].reverse().find(c => c?.status === "complete" && c.high != null && c.low != null);
+  const sixHEq = _activeSixH ? (_activeSixH.high + _activeSixH.low) / 2 : null;
+
   const dailySig  = attachDailyEntry(md, buildDailySignal(md));
   const sixHSig   = build6HSignal(md);
   const ninetyMin = build90MinSignal(md);
@@ -929,13 +980,13 @@ function MarketBlock({ market, liveData }) {
             journal page only. Wrapped in ViewTracker so admin can see who
             actually scrolls to which signal. */}
         <ViewTracker market={market} tf="daily"  setupId={dailySetup?.id}>
-          <SignalCard label="Daily" sig={daily}  market={market} activeSetup={dailySetup}   currentPrice={currentPrice} hasPinnedActive={dailyHasPinned}  hasRecentClose={dailyRecentClose} />
+          <SignalCard label="Daily" sig={daily}  market={market} activeSetup={dailySetup}   currentPrice={currentPrice} dailyEq={dailyEq} sixHEq={sixHEq} hasPinnedActive={dailyHasPinned}  hasRecentClose={dailyRecentClose} />
         </ViewTracker>
         <ViewTracker market={market} tf="6H"     setupId={sixHSetup?.id}>
-          <SignalCard label="6H"    sig={sixH}   market={market} activeSetup={sixHSetup}    currentPrice={currentPrice} hasPinnedActive={sixHHasPinned}   hasRecentClose={sixHRecentClose} />
+          <SignalCard label="6H"    sig={sixH}   market={market} activeSetup={sixHSetup}    currentPrice={currentPrice} dailyEq={dailyEq} sixHEq={sixHEq} hasPinnedActive={sixHHasPinned}   hasRecentClose={sixHRecentClose} />
         </ViewTracker>
         <ViewTracker market={market} tf="90min"  setupId={ninetySetup?.id}>
-          <SignalCard label="90min" sig={ninety} market={market} activeSetup={ninetySetup}  currentPrice={currentPrice} hasPinnedActive={ninetyHasPinned} hasRecentClose={ninetyRecentClose} />
+          <SignalCard label="90min" sig={ninety} market={market} activeSetup={ninetySetup}  currentPrice={currentPrice} dailyEq={dailyEq} sixHEq={sixHEq} hasPinnedActive={ninetyHasPinned} hasRecentClose={ninetyRecentClose} />
         </ViewTracker>
       </div>
     </div>

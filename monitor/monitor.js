@@ -340,7 +340,7 @@ function updateSetupLogOutcome(id, outcome, extra = {}) {
 //      candle open, recompute SL via canonical formula, mark ACTIVE, then
 //      verify outcome.
 //   2. ACTIVE → run verifyOutcome to detect SL/TP hits.
-function verifyOrphanedActives(marketKey, candles, currentActiveId = null) {
+function verifyOrphanedActives(marketKey, candles, currentActiveId = null, dailyEq = null, sixHEq = null) {
   if (!candles?.length) return;
   const log = readJSON(SETUP_LOG_FILE, []);
   let dirty = false;
@@ -384,8 +384,9 @@ function verifyOrphanedActives(marketKey, candles, currentActiveId = null) {
       // weekly recap + MetaApi signal + Discord. persistActive=false because the
       // orphan's id ≠ currentActiveId, so writing the active-slot file would
       // overwrite the genuine current active setup.
-      fireEntryTrigger(marketKey, item, { sourceTag: "orphan", persistActive: false })
-        .catch(() => {});
+      fireEntryTrigger(marketKey, item, {
+        sourceTag: "orphan", persistActive: false, dailyEq, sixHEq,
+      }).catch(() => {});
       // fall through to outcome-verify below with the freshly-set fields
     }
 
@@ -1388,6 +1389,62 @@ async function sendDiscordTradeEvent(marketKey, event /*, details*/) {
   await _sendNotify(`${emoji} **${marketKey}** — ${label}`);
 }
 
+// ── Premium / Discount entry-zone filter ─────────────────────────────────────
+// Only allow entries when the step-2 sweep landed in the right zone of BOTH
+// the daily session's running range AND the currently-active 6H cycle's range:
+//   BUY  → SSL sweep low  must be in DISCOUNT (below 50% eq) of daily AND 6H
+//   SELL → BSL sweep high must be in PREMIUM  (above 50% eq) of daily AND 6H
+// Setup creation + sweep detection are unaffected — this gates ONLY the entry
+// fire. Failing setups are marked CANCELLED with cancelReason for the journal.
+function computeDailyEq(candles, dayStartTs) {
+  const today = candles.filter(c => c.timestamp >= dayStartTs);
+  if (!today.length) return null;
+  const high = Math.max(...today.map(c => c.high));
+  const low  = Math.min(...today.map(c => c.low));
+  return (high + low) / 2;
+}
+
+function computeSixHEq(cycles6H) {
+  // Use the in-progress 6H cycle's running high/low. That's the "current 6H
+  // session" range — the right reference for "is sweep in this session's
+  // discount/premium". Fall through to most-recent completed if no active.
+  const all = Object.values(cycles6H || {});
+  const active = all.find(c => c.status === "active" && c.high != null && c.low != null);
+  const ref = active
+    ?? [...all].reverse().find(c => c.status === "complete" && c.high != null && c.low != null);
+  if (!ref) return null;
+  return (ref.high + ref.low) / 2;
+}
+
+function checkEntryZoneFilter(setup, dailyEq, sixHEq) {
+  if (dailyEq == null || sixHEq == null) {
+    return { passes: true, reason: "incomplete-zone-data" };  // fail-open
+  }
+  if (setup.sweepPrice == null) {
+    return { passes: true, reason: "no-sweep-price" };
+  }
+  const sp = setup.sweepPrice;
+  if (setup.direction === "BUY") {
+    const inDailyDiscount = sp < dailyEq;
+    const inSixHDiscount  = sp < sixHEq;
+    if (inDailyDiscount && inSixHDiscount) return { passes: true, reason: "BUY discount-aligned" };
+    return {
+      passes: false,
+      reason: `BUY sweep ${sp.toFixed(2)} not in discount — daily eq ${dailyEq.toFixed(2)} (${inDailyDiscount ? "✓" : "✗"}), 6H eq ${sixHEq.toFixed(2)} (${inSixHDiscount ? "✓" : "✗"})`,
+    };
+  }
+  if (setup.direction === "SELL") {
+    const inDailyPremium = sp > dailyEq;
+    const inSixHPremium  = sp > sixHEq;
+    if (inDailyPremium && inSixHPremium) return { passes: true, reason: "SELL premium-aligned" };
+    return {
+      passes: false,
+      reason: `SELL sweep ${sp.toFixed(2)} not in premium — daily eq ${dailyEq.toFixed(2)} (${inDailyPremium ? "✓" : "✗"}), 6H eq ${sixHEq.toFixed(2)} (${inSixHPremium ? "✓" : "✗"})`,
+    };
+  }
+  return { passes: true, reason: "unknown-direction" };
+}
+
 // ── Single source of truth for ENTRY-TRIGGER fan-out ─────────────────────────
 // Every entry-trigger pad (daily 06:00, 90M/6H time-based, orphan-recovery)
 // MUST call this. The function guarantees that flipping a setup to ACTIVE
@@ -1408,8 +1465,31 @@ async function sendDiscordTradeEvent(marketKey, event /*, details*/) {
 // External calls (5, 6) are fire-and-forget so a slow / failing endpoint
 // can never block the cron tick.
 async function fireEntryTrigger(marketKey, setup, opts = {}) {
-  const { sourceTag = null, persistActive = true } = opts;
+  const { sourceTag = null, persistActive = true, dailyEq = null, sixHEq = null } = opts;
   const tag = sourceTag ? ` (${sourceTag})` : "";
+
+  // 0. Premium / Discount entry-zone filter. Skipped when callers don't pass
+  //    eq values (back-compat). On filter fail: mark CANCELLED, clear the
+  //    active slot for non-orphan paths, mutate the in-memory setup so any
+  //    same-tick "if status === ACTIVE" checks bail out, and SKIP the 6
+  //    fan-out actions (no MetaApi, no Discord, no log_open counter).
+  if (dailyEq != null && sixHEq != null) {
+    const f = checkEntryZoneFilter(setup, dailyEq, sixHEq);
+    if (!f.passes) {
+      logEvent(marketKey, "ENTRY_FILTERED",
+        `${setup.direction}${tag} — ${f.reason}`, "skipped");
+      patchSetupLog(setup.id, {
+        status:       "CANCELLED",
+        outcome:      null,
+        cancelReason: f.reason,
+      });
+      setup.status = "CANCELLED";
+      if (persistActive) {
+        try { await clearSetup(marketKey, setup, `PD filter: ${f.reason}`); } catch {}
+      }
+      return { passed: false, reason: f.reason };
+    }
+  }
 
   // 1. Debug log — picked up by dashboard live-event feed.
   logEvent(marketKey, "ENTRY_TRIGGERED",
@@ -1444,6 +1524,8 @@ async function fireEntryTrigger(marketKey, setup, opts = {}) {
   sendDiscordTradeEvent(marketKey, "ENTRY_TRIGGERED",
     `${setup.direction} @ ${fp(setup.entry)} | SL: ${fp(setup.sl)} | TP: ${fp(setup.tp1)}`)
     .catch(() => {});
+
+  return { passed: true };
 }
 
 async function sendDiscordEntryWindow(setup /*, windowLabel*/) {
@@ -1758,6 +1840,12 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   const cycles6H  = build6HCycles(candles, dayStartTs);
   // 18:00 ET session grouping — labels match D-candle convention (close date)
   const dailyDays = buildDailyStructure(candles);
+
+  // Premium / Discount equilibrium values used by checkEntryZoneFilter to
+  // gate entry-trigger paths. Computed once per analyzeMarket so all 3
+  // entry paths (daily / 90M-6H / orphan-recovery) see the same numbers.
+  const dailyEq = computeDailyEq(candles, dayStartTs);
+  const sixHEq  = computeSixHEq(cycles6H);
 
   // Order flow lock — ALWAYS derived from buildDailyStructure on the in-memory
   // 15-min candles. Trading day = 18:00 ET → 18:00 ET (matches the 6H cycles
@@ -2291,7 +2379,11 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
       activeSetup.status = "ACTIVE";
       activeSetup.entryTs = entryCandle.timestamp * 1000;
       activeSetup.entryTime = tsToETLabel(entryCandle.timestamp);
-      await fireEntryTrigger(marketKey, activeSetup, { sourceTag: "daily 06:00" });
+      const r = await fireEntryTrigger(marketKey, activeSetup, {
+        sourceTag: "daily 06:00",
+        dailyEq, sixHEq,
+      });
+      if (!r?.passed) activeSetup = null;  // filter cleared the active slot
     }
   }
 
@@ -2347,9 +2439,11 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
         activeSetup.entryTs = entryCandle.timestamp * 1000;
         activeSetup.entryTime = tsToETLabel(entryCandle.timestamp);
 
-        await fireEntryTrigger(marketKey, activeSetup, {
+        const r = await fireEntryTrigger(marketKey, activeSetup, {
           sourceTag: `time-based | Window: ${phaseInfo.activeP2?.label}`,
+          dailyEq, sixHEq,
         });
+        if (!r?.passed) activeSetup = null;  // filter cleared the active slot
       } else if (!activeSetup.entryTriggered) {
         logEvent(marketKey, "WAITING_PHASE2_ENTRY", `${activeSetup.direction} @ ${activeSetup.entry} | Current: ${currentPrice} | Entry window open (14:30+)`, "waiting");
       }
@@ -2433,7 +2527,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   // Also verify ANY other ACTIVE setup_log entries for this market — needed
   // because the active-slot file holds only one setup per market, so a 6H + 90M
   // pair gets one of them orphaned. Without this scan the orphan never closes.
-  verifyOrphanedActives(marketKey, candles, activeSetup?.id ?? null);
+  verifyOrphanedActives(marketKey, candles, activeSetup?.id ?? null, dailyEq, sixHEq);
 
   // ── Write market data for dashboard/API ───────────────────────────────────
   const lastCandle = candles[candles.length - 1];

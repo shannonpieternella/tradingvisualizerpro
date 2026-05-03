@@ -141,6 +141,25 @@
 .ls-lock-strength { font-size: 10px; color: #8aaabf; margin-left: auto; }
 .ls-nolock { font-size: 11px; color: #6688aa; }
 
+/* Premium / Discount tag next to a sweep step.
+   Default = neutral grey. When the zone aligns with the setup direction
+   (BUY in DISCOUNT, SELL in PREMIUM) it lights up — green for discount,
+   warm orange for premium. ⚠ marker added when daily and 6H disagree. */
+.ls-zone-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  vertical-align: 1px;
+  background: rgba(120,140,160,.18);
+  color: #8aaabf;
+}
+.ls-zone-aligned.ls-zone-d { background: rgba(0,200,120,.22); color: #4cdc9b; }
+.ls-zone-aligned.ls-zone-p { background: rgba(240,140,60,.24); color: #ffb070; }
+
 /* Status badges */
 .ls-status-badge {
   font-size: 10px; border-radius: 3px; padding: 1px 6px; font-weight: 600;
