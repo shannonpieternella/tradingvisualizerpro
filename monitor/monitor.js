@@ -379,6 +379,21 @@ function verifyOrphanedActives(marketKey, candles, currentActiveId = null) {
       item.slHit     = false;
       console.log(`[${marketKey}] ORPHAN TRIGGER: ${item.id} → ACTIVE entry=${actualEntry} sl=${slPrice} tp1=${tp1}`);
       dirty = true;
+
+      // Parity with main entry-trigger paths (regels 2742 + 2810): when a setup
+      // flips to ACTIVE we MUST notify MetaApi (CopyFactory) + Discord and emit
+      // ENTRY_TRIGGERED to the debug log. Without this, orphan-triggered setups
+      // (the path the BTC 02:45 ET trade took on 2026-05-03) reach TP/SL without
+      // any broker order ever being placed, and cfCancelSignal at outcome-time
+      // 404s on a signal that never existed.
+      logEvent(marketKey, "ENTRY_TRIGGERED",
+        `${item.direction} @ ${actualEntry} (orphan) | SL: ${slPrice} | TP1: ${tp1}`,
+        "entry");
+      cfNotifySignal(item, marketKey).catch(() => {});
+      const _fpOrphan = p => p > 100 ? Number(p).toFixed(1) : Number(p).toFixed(5);
+      sendDiscordTradeEvent(marketKey, "ENTRY_TRIGGERED",
+        `${item.direction} @ ${_fpOrphan(actualEntry)} | SL: ${_fpOrphan(slPrice)} | TP: ${_fpOrphan(tp1)}`)
+        .catch(() => {});
       // fall through to outcome-verify below with the freshly-set fields
     }
 
