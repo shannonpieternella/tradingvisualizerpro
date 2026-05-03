@@ -9,6 +9,7 @@ import StatusBar from "./components/StatusBar.jsx";
 import MarketTabs from "./components/MarketTabs.jsx";
 import LiveSignals from "./components/LiveSignals.jsx";
 import LockBiasPanel from "./components/LockBiasPanel.jsx";
+import PremiumDiscountPanel from "./components/PremiumDiscountPanel.jsx";
 import { useAuth } from "./contexts/AuthContext.jsx";
 import { useLiveData } from "./contexts/LiveDataContext.jsx";
 import "./App.css";
@@ -169,6 +170,10 @@ export default function Dashboard() {
 
           {/* Lock & Bias audit */}
           <LockBiasPanel activeMarket={activeTab} onBiasChange={() => { fetchMarkets(); setBiasVersion(v => v + 1); }} />
+
+          {/* Premium / Discount zones — Daily (18:00 ET → now) + 6H ref cycle.
+              Display-only, geen filter. ⭐ GOLDEN wanneer setup-richting met de zone aligneert. */}
+          <PremiumDiscountPanel activeMarket={activeTab} />
 
           {/* Live Fractal Signals */}
           <LiveSignals activeMarket={activeTab} biasMode="daily" refreshKey={biasVersion} />
