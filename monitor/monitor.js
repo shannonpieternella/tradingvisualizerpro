@@ -380,19 +380,11 @@ function verifyOrphanedActives(marketKey, candles, currentActiveId = null) {
       console.log(`[${marketKey}] ORPHAN TRIGGER: ${item.id} → ACTIVE entry=${actualEntry} sl=${slPrice} tp1=${tp1}`);
       dirty = true;
 
-      // Parity with main entry-trigger paths (regels 2742 + 2810): when a setup
-      // flips to ACTIVE we MUST notify MetaApi (CopyFactory) + Discord and emit
-      // ENTRY_TRIGGERED to the debug log. Without this, orphan-triggered setups
-      // (the path the BTC 02:45 ET trade took on 2026-05-03) reach TP/SL without
-      // any broker order ever being placed, and cfCancelSignal at outcome-time
-      // 404s on a signal that never existed.
-      logEvent(marketKey, "ENTRY_TRIGGERED",
-        `${item.direction} @ ${actualEntry} (orphan) | SL: ${slPrice} | TP1: ${tp1}`,
-        "entry");
-      cfNotifySignal(item, marketKey).catch(() => {});
-      const _fpOrphan = p => p > 100 ? Number(p).toFixed(1) : Number(p).toFixed(5);
-      sendDiscordTradeEvent(marketKey, "ENTRY_TRIGGERED",
-        `${item.direction} @ ${_fpOrphan(actualEntry)} | SL: ${_fpOrphan(slPrice)} | TP: ${_fpOrphan(tp1)}`)
+      // Single-source-of-truth fan-out: ENTRY_TRIGGERED log + setup_log patch +
+      // weekly recap + MetaApi signal + Discord. persistActive=false because the
+      // orphan's id ≠ currentActiveId, so writing the active-slot file would
+      // overwrite the genuine current active setup.
+      fireEntryTrigger(marketKey, item, { sourceTag: "orphan", persistActive: false })
         .catch(() => {});
       // fall through to outcome-verify below with the freshly-set fields
     }
@@ -1396,6 +1388,64 @@ async function sendDiscordTradeEvent(marketKey, event /*, details*/) {
   await _sendNotify(`${emoji} **${marketKey}** — ${label}`);
 }
 
+// ── Single source of truth for ENTRY-TRIGGER fan-out ─────────────────────────
+// Every entry-trigger pad (daily 06:00, 90M/6H time-based, orphan-recovery)
+// MUST call this. The function guarantees that flipping a setup to ACTIVE
+// always produces these effects together — so a path can never accidentally
+// fire one without the others (e.g. Discord without MetaApi, or card-update
+// without broker signal — the bug that caused BTC 02:45 ET 2026-05-03 to TP2
+// without ever placing an order):
+//
+//   1. ENTRY_TRIGGERED logged → debug_log.json + monitor.log + dashboard event feed
+//   2. setup_log.json patched (entry/sl/tp1/tp2/entryTs/entryTime/status="ACTIVE")
+//      → dashboard cards + history immediately reflect the trade
+//   3. active-slot file + MongoDB synced (only when persistActive=true; the
+//      orphan path passes false because its setup is NOT the current active slot)
+//   4. updateWeeklyRecap counter incremented
+//   5. MetaApi CopyFactory signal sent (TP1 leg + TP2 leg)
+//   6. Discord trade-event ENTRY_TRIGGERED posted
+//
+// External calls (5, 6) are fire-and-forget so a slow / failing endpoint
+// can never block the cron tick.
+async function fireEntryTrigger(marketKey, setup, opts = {}) {
+  const { sourceTag = null, persistActive = true } = opts;
+  const tag = sourceTag ? ` (${sourceTag})` : "";
+
+  // 1. Debug log — picked up by dashboard live-event feed.
+  logEvent(marketKey, "ENTRY_TRIGGERED",
+    `${setup.direction} @ ${setup.entry}${tag} | SL: ${setup.sl} | TP1: ${setup.tp1}`,
+    "entry");
+
+  // 2. setup_log.json — historical record + dashboard card state.
+  patchSetupLog(setup.id, {
+    entry:     setup.entry,
+    sl:        setup.sl,
+    tp1:       setup.tp1,
+    tp2:       setup.tp2,
+    entryTime: setup.entryTime,
+    entryTs:   setup.entryTs,
+    status:    "ACTIVE",
+  });
+
+  // 3. Weekly stats counter.
+  updateWeeklyRecap(marketKey, { type: "trade_open" });
+
+  // 4. Active-slot file + MongoDB (skipped for orphan: orphan id ≠ active slot
+  //    so writing would overwrite the genuine current active setup).
+  if (persistActive) {
+    await saveSetup(marketKey, setup);
+  }
+
+  // 5. MetaApi CopyFactory — fire-and-forget.
+  cfNotifySignal(setup, marketKey).catch(() => {});
+
+  // 6. Discord trade-event — fire-and-forget.
+  const fp = p => p > 100 ? Number(p).toFixed(1) : Number(p).toFixed(5);
+  sendDiscordTradeEvent(marketKey, "ENTRY_TRIGGERED",
+    `${setup.direction} @ ${fp(setup.entry)} | SL: ${fp(setup.sl)} | TP: ${fp(setup.tp1)}`)
+    .catch(() => {});
+}
+
 async function sendDiscordEntryWindow(setup /*, windowLabel*/) {
   // Entry window opened — user opens dashboard to see price/SL/TP.
   await _sendNotify(`⏰ **${setup.market}** · ${setup.tf} — entry window open nu`);
@@ -2241,15 +2291,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
       activeSetup.status = "ACTIVE";
       activeSetup.entryTs = entryCandle.timestamp * 1000;
       activeSetup.entryTime = tsToETLabel(entryCandle.timestamp);
-      logEvent(marketKey, "ENTRY_TRIGGERED",
-        `${activeSetup.direction} @ ${actualEntry} (daily 06:00) | SL: ${slPrice} | TP1: ${tp1}`, "entry");
-      patchSetupLog(activeSetup.id, {
-        entry: actualEntry, sl: slPrice, tp1, tp2,
-        entryTime: activeSetup.entryTime, entryTs: activeSetup.entryTs, status: "ACTIVE",
-      });
-      updateWeeklyRecap(marketKey, { type: "trade_open" });
-      await saveSetup(marketKey, activeSetup);
-      cfNotifySignal(activeSetup, marketKey).catch(() => {});
+      await fireEntryTrigger(marketKey, activeSetup, { sourceTag: "daily 06:00" });
     }
   }
 
@@ -2305,22 +2347,9 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
         activeSetup.entryTs = entryCandle.timestamp * 1000;
         activeSetup.entryTime = tsToETLabel(entryCandle.timestamp);
 
-        logEvent(marketKey, "ENTRY_TRIGGERED", `${activeSetup.direction} @ ${activeSetup.entry} (time-based) | SL: ${activeSetup.sl} | TP1: ${activeSetup.tp1} | Window: ${phaseInfo.activeP2?.label}`, "entry");
-        patchSetupLog(activeSetup.id, {
-          entry:     activeSetup.entry,
-          sl:        activeSetup.sl,
-          tp1:       activeSetup.tp1,
-          tp2:       activeSetup.tp2,
-          entryTime: activeSetup.entryTime,
-          entryTs:   activeSetup.entryTs,
-          status:    "ACTIVE",
+        await fireEntryTrigger(marketKey, activeSetup, {
+          sourceTag: `time-based | Window: ${phaseInfo.activeP2?.label}`,
         });
-        updateWeeklyRecap(marketKey, { type: "trade_open" });
-        await saveSetup(marketKey, activeSetup);
-        cfNotifySignal(activeSetup, marketKey).catch(() => {});
-        const _fp2 = p => p > 100 ? Number(p).toFixed(1) : Number(p).toFixed(5);
-        await sendDiscordTradeEvent(marketKey, "ENTRY_TRIGGERED",
-          `${activeSetup.direction} @ ${_fp2(activeSetup.entry)} | SL: ${_fp2(activeSetup.sl)} | TP: ${_fp2(activeSetup.tp1)}`);
       } else if (!activeSetup.entryTriggered) {
         logEvent(marketKey, "WAITING_PHASE2_ENTRY", `${activeSetup.direction} @ ${activeSetup.entry} | Current: ${currentPrice} | Entry window open (14:30+)`, "waiting");
       }
