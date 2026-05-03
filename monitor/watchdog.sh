@@ -6,7 +6,11 @@
 #   Mon-Fri  -> check NAS100 + ETHUSD (both should be live)
 #   Sat-Sun  -> check ETHUSD only (crypto is 24/7, US markets closed)
 
-DISCORD_WEBHOOK="https://discord.com/api/webhooks/1490817002556755979/PNFk3zeUmTTTyYtKUzM1dyOrsgKMwR3J4o09aqz3-KoGCjxbdXShdq6fWV7LcW7qZWSt"
+# Watchdog alerts (data-stale / recovery) gaan naar Morpheus — NIET naar Neo.
+# Neo channel ontvangt alleen handelsignalen (entry, TP, SL, setup) via monitor.js.
+# Override via MORPHEUS_WEBHOOK env var; valt anders terug op de hard-coded URL.
+DISCORD_WEBHOOK="${MORPHEUS_WEBHOOK:-$(grep -E '^MORPHEUS_WEBHOOK=' /opt/trading-assistant/.env 2>/dev/null | cut -d= -f2-)}"
+DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-https://discord.com/api/webhooks/1499721149699854416/FYxLPre7PJ4m8CytRq94u40Od4LsV1AWswvZV0qgXWcPN9xMeP_olNvHiAuACZL4C6SB}"
 DATA_DIR="/opt/trading-assistant/monitor"
 MAX_AGE_SECS=300   # 5 minutes
 ALERT_COOLDOWN_FILE="/tmp/watchdog_alert_sent"
