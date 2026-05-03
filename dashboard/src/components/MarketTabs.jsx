@@ -21,7 +21,11 @@ export default function MarketTabs({ marketsData, activeTab, onSelect, marketSta
   function getStatus(key) {
     const d = marketsData[key];
     if (!d) return { type: "offline", label: "—" };
-    const { signal, activeTrade, tradeProgress, fractalSignals, biasSummary, allowedDirection, lockState, activeSetup } = d;
+    const { signal, activeTrade, tradeProgress, fractalSignals, biasSummary, allowedDirection, lockState, activeSetup, adminBias } = d;
+
+    // Manual admin override — BULLISH/BEARISH from /admin must beat auto-lock so
+    // the tab badge flips immediately. AUTO falls through to lock-based logic.
+    const manualOverride = adminBias === "BULLISH" || adminBias === "BEARISH" ? adminBias : null;
 
     // Active setup from monitor — only show if it matches current allowed direction
     if (activeSetup && (!allowedDirection || activeSetup.direction === allowedDirection)) {
@@ -54,17 +58,14 @@ export default function MarketTabs({ marketsData, activeTab, onSelect, marketSta
       }
     }
 
-    // Show lock direction as bias badge
-    if (lockState?.direction) {
-      const isBull = lockState.direction === "BULLISH";
+    // Bias badge — manual override beats auto lock, lock beats biasSummary.
+    // Without this priority, flipping admin to BEARISH on /admin keeps the tab
+    // showing BULL until the auto-lock recomputes hours later.
+    const effectiveBias = manualOverride ?? lockState?.direction
+      ?? (biasSummary?.bias && biasSummary.bias !== "NEUTRAL" ? biasSummary.bias : null);
+    if (effectiveBias) {
+      const isBull = effectiveBias === "BULLISH";
       return { type: isBull ? "bias-bull" : "bias-bear", label: isBull ? "BULL" : "BEAR" };
-    }
-
-    if (biasSummary?.bias && biasSummary.bias !== "NEUTRAL") {
-      return {
-        type: biasSummary.bias === "BULLISH" ? "bias-bull" : "bias-bear",
-        label: biasSummary.bias === "BULLISH" ? "BULL" : "BEAR",
-      };
     }
 
     return { type: "neutral", label: "—" };
