@@ -107,6 +107,17 @@ function TradeCard({ s }) {
             {s.lockAlignment === "none"    && "○ geen lock"}
           </span>
         )}
+        {/* Premium / Discount alignment badge — present only on entries that
+            were captured AFTER the PD-filter rollout. Older trades show no
+            badge so the absence is clearly distinguishable from a misalign. */}
+        {s.pdAligned != null && (
+          <span className={`jp-pd-badge ${s.pdAligned ? "jp-pd-aligned" : "jp-pd-misaligned"}`}
+                title={`Sweep ${s.pdSweepPrice ?? "?"} | Daily ${s.pdZoneDaily ?? "?"} (eq ${s.pdDailyEq?.toFixed?.(1) ?? "?"}) | 6H ${s.pdZoneSixH ?? "?"} (eq ${s.pdSixHEq?.toFixed?.(1) ?? "?"})`}>
+            {s.pdAligned
+              ? `⭐ ${isBuy ? "DISC" : "PREM"} aligned`
+              : `⚠ PD misaligned`}
+          </span>
+        )}
         {s.datetime && <span className="jp-card-date">{s.datetime}</span>}
       </div>
 
@@ -322,6 +333,36 @@ export default function JournalPage() {
                 <span className="jp-bd-wr">{s.winRate != null ? `${s.winRate}%` : "—"}</span>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {stats?.byPdAlignment && (
+        stats.byPdAlignment.aligned.wins + stats.byPdAlignment.aligned.losses
+        + stats.byPdAlignment.misaligned.wins + stats.byPdAlignment.misaligned.losses > 0
+      ) && (
+        <div className="jp-breakdown">
+          <div className="jp-breakdown-title">
+            Premium / Discount alignment
+            <span className="jp-bd-subtitle"> — alleen voor trades nadat de PD-filter live ging</span>
+          </div>
+          <div className="jp-breakdown-grid">
+            {[
+              ["aligned",    "⭐ Aligned",    "PD-filter ✓"],
+              ["misaligned", "⚠ Misaligned", "filter zou geblokkeerd hebben"],
+              ["unknown",    "— Geen data",   "vóór de PD-filter rollout"],
+            ].map(([key, label, sub]) => {
+              const s = stats.byPdAlignment[key];
+              if (!s || (s.wins + s.losses + s.open) === 0) return null;
+              return (
+                <div key={key} className={`jp-bd-tile jp-pd-tile-${key}`}>
+                  <span className="jp-bd-mk">{label}</span>
+                  <span className="jp-bd-wl">{s.wins}W / {s.losses}L{s.open ? ` (+${s.open} open)` : ""}</span>
+                  <span className="jp-bd-wr">{s.winRate != null ? `${s.winRate}%` : "—"}</span>
+                  <span className="jp-bd-sub">{sub}</span>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

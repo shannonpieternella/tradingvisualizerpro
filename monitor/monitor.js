@@ -1468,6 +1468,25 @@ async function fireEntryTrigger(marketKey, setup, opts = {}) {
   const { sourceTag = null, persistActive = true, dailyEq = null, sixHEq = null } = opts;
   const tag = sourceTag ? ` (${sourceTag})` : "";
 
+  // Snapshot the PD zones at entry-trigger time so the journal page can later
+  // show stats by alignment. Stored on every trade (passed AND filtered) so
+  // the user can compare aligned vs filtered-out outcomes if/when filtering
+  // gets relaxed. Uses the same eqs the filter does — single source of truth.
+  const sp = setup.sweepPrice;
+  const pdSnapshot = (sp != null && (dailyEq != null || sixHEq != null)) ? {
+    pdSweepPrice:   sp,
+    pdDailyEq:      dailyEq,
+    pdSixHEq:       sixHEq,
+    pdZoneDaily:    dailyEq != null ? (sp < dailyEq ? "DISCOUNT" : "PREMIUM") : null,
+    pdZoneSixH:     sixHEq  != null ? (sp < sixHEq  ? "DISCOUNT" : "PREMIUM") : null,
+    pdAligned:
+      setup.direction === "BUY"
+        ? (dailyEq != null && sixHEq != null && sp < dailyEq && sp < sixHEq)
+        : setup.direction === "SELL"
+          ? (dailyEq != null && sixHEq != null && sp > dailyEq && sp > sixHEq)
+          : false,
+  } : {};
+
   // 0. Premium / Discount entry-zone filter. Skipped when callers don't pass
   //    eq values (back-compat). On filter fail: mark CANCELLED, clear the
   //    active slot for non-orphan paths, mutate the in-memory setup so any
@@ -1482,6 +1501,7 @@ async function fireEntryTrigger(marketKey, setup, opts = {}) {
         status:       "CANCELLED",
         outcome:      null,
         cancelReason: f.reason,
+        ...pdSnapshot,
       });
       setup.status = "CANCELLED";
       if (persistActive) {
@@ -1505,6 +1525,7 @@ async function fireEntryTrigger(marketKey, setup, opts = {}) {
     entryTime: setup.entryTime,
     entryTs:   setup.entryTs,
     status:    "ACTIVE",
+    ...pdSnapshot,
   });
 
   // 3. Weekly stats counter.

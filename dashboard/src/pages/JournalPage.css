@@ -174,3 +174,18 @@
 .jp-lock-with    { background: rgba(0,255,136,.15);  color: #00ff88; }
 .jp-lock-against { background: rgba(255,62,94,.15);  color: #ff3e5e; }
 .jp-lock-none    { background: rgba(148,163,184,.12); color: #94a3b8; }
+
+/* Premium / Discount alignment badge on the journal trade card. */
+.jp-pd-badge {
+  font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;
+  letter-spacing: 0.3px;
+}
+.jp-pd-aligned    { background: rgba(240,192,80,.18);  color: #f0c050; }
+.jp-pd-misaligned { background: rgba(255,140,80,.18);  color: #ff8c50; }
+
+/* PD breakdown panel tile sub-text + accent borders */
+.jp-bd-subtitle { font-size: 11px; color: #6c8aab; font-weight: 400; margin-left: 8px; }
+.jp-bd-sub      { font-size: 10px; color: #6c8aab; }
+.jp-pd-tile-aligned    { border-left: 3px solid #f0c050; }
+.jp-pd-tile-misaligned { border-left: 3px solid #ff8c50; }
+.jp-pd-tile-unknown    { border-left: 3px solid #475569; }

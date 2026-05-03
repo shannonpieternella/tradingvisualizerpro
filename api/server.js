@@ -2704,6 +2704,28 @@ app.get("/api/journal/stats", requireAuth, async (req, res) => {
       else                      byDow[dow].open++;
     }
 
+    // Per Premium/Discount alignment breakdown — pdAligned was only stored on
+    // entries captured AFTER the PD-filter rollout, so older trades fall in
+    // the `unknown` bucket and let the user see how much history pre-dates
+    // the feature.
+    const byPdAlignment = {
+      aligned:    { wins: 0, losses: 0, open: 0 },
+      misaligned: { wins: 0, losses: 0, open: 0 },
+      unknown:    { wins: 0, losses: 0, open: 0 },
+    };
+    for (const e of filtered) {
+      const bucket = e.pdAligned === true  ? byPdAlignment.aligned
+                   : e.pdAligned === false ? byPdAlignment.misaligned
+                   : byPdAlignment.unknown;
+      if (e.outcome === "WIN")       bucket.wins++;
+      else if (e.outcome === "LOSS") bucket.losses++;
+      else                            bucket.open++;
+    }
+    for (const k of Object.keys(byPdAlignment)) {
+      const t = byPdAlignment[k].wins + byPdAlignment[k].losses;
+      byPdAlignment[k].winRate = t > 0 ? +(byPdAlignment[k].wins / t * 100).toFixed(1) : null;
+    }
+
     // Per entry-window-time (ET) breakdown — which session times are profitable
     const byEntryWindow = {};
     for (const e of filtered) {
@@ -2737,7 +2759,7 @@ app.get("/api/journal/stats", requireAuth, async (req, res) => {
       total: filtered.length,
       wins, losses, open,
       winRate, avgR,
-      byMarket, byDow, byEntryWindow,
+      byMarket, byDow, byEntryWindow, byPdAlignment,
       entryWindows,
     });
   } catch (e) {
