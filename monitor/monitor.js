@@ -27,7 +27,7 @@ try {
   });
 } catch {}
 
-const DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1490817002556755979/PNFk3zeUmTTTyYtKUzM1dyOrsgKMwR3J4o09aqz3-KoGCjxbdXShdq6fWV7LcW7qZWSt";
+const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK || env.DISCORD_WEBHOOK || "https://discord.com/api/webhooks/1490817002556755979/PNFk3zeUmTTTyYtKUzM1dyOrsgKMwR3J4o09aqz3-KoGCjxbdXShdq6fWV7LcW7qZWSt";
 const MCP_TOKEN       = process.env.MCP_TOKEN || env.MCP_TOKEN || "";
 const MCP_URL         = "https://178-104-80-233.sslip.io/mcp";
 const MONGO_URI       = process.env.MONGO_URI  || env.MONGO_URI  || "";
@@ -64,14 +64,18 @@ async function closeDB() {
 }
 
 // ── Markets ───────────────────────────────────────────────────────────────────
+// Tightened to current realistic price ranges so cross-market candle contamination
+// (MCP symbol-switch lag during fetches) gets caught by sanitizeCandles. Bounds
+// are wide enough to absorb 6+ months of price drift but narrow enough to
+// reject another market's prices (e.g., XAU 4600 won't pass for US500 [6000+]).
 const MARKETS = {
-  NAS100: { tvSymbol: "CAPITALCOM:US100", priceMin: 10000, priceMax: 30000, label: "NAS100" },
-  US500:  { tvSymbol: "CAPITALCOM:US500", priceMin:  3000, priceMax: 12000, label: "US500"  },
-  US30:   { tvSymbol: "CAPITALCOM:US30",  priceMin: 20000, priceMax: 70000, label: "US30"   },
-  XAUUSD: { tvSymbol: "OANDA:XAUUSD",     priceMin:  1500, priceMax:  7000, label: "XAUUSD" },
-  GBPUSD: { tvSymbol: "OANDA:GBPUSD",     priceMin:   1.0, priceMax:   2.2, label: "GBPUSD" },
-  BTCUSD: { tvSymbol: "COINBASE:BTCUSD",  priceMin: 10000, priceMax: 200000, label: "BTCUSD" },
-  ETHUSD: { tvSymbol: "COINBASE:ETHUSD",  priceMin:   500, priceMax: 20000, label: "ETHUSD" },
+  NAS100: { tvSymbol: "CAPITALCOM:US100", priceMin: 18000, priceMax: 35000, label: "NAS100" },
+  US500:  { tvSymbol: "CAPITALCOM:US500", priceMin:  5500, priceMax:  9000, label: "US500"  },
+  US30:   { tvSymbol: "CAPITALCOM:US30",  priceMin: 38000, priceMax: 60000, label: "US30"   },
+  XAUUSD: { tvSymbol: "OANDA:XAUUSD",     priceMin:  3500, priceMax:  6000, label: "XAUUSD" },
+  GBPUSD: { tvSymbol: "OANDA:GBPUSD",     priceMin:   1.1, priceMax:   1.6, label: "GBPUSD" },
+  BTCUSD: { tvSymbol: "COINBASE:BTCUSD",  priceMin: 50000, priceMax: 200000, label: "BTCUSD" },
+  ETHUSD: { tvSymbol: "COINBASE:ETHUSD",  priceMin:  1500, priceMax:  3500, label: "ETHUSD" },
 };
 const ACTIVE_MARKETS = ["NAS100", "US500", "US30", "XAUUSD", "GBPUSD", "BTCUSD", "ETHUSD"];
 const CRYPTO_MARKETS = new Set(["BTCUSD", "ETHUSD"]);
@@ -218,6 +222,25 @@ function getNextPhase2(dayStartTs) {
   return buildEntries(dayStartTs + 24 * 3600)[0];
 }
 
+// Scalp entry windows = primary entry windows + 1h. So C1 → 21:45 ET, C2 → 03:45,
+// C3 → 09:45, C4 → 15:45. Returns the next scalp window strictly after nowTs.
+// Each window's `entryTs` is the timestamp of the 1m candle that opens it.
+const SCALP_OFFSET_MIN = 60;
+function getNextScalpEntryWindow(dayStartTs, fromTs = null) {
+  const nowTs = fromTs ?? Date.now() / 1000;
+  const buildEntries = (startTs) => Object.entries(PHASE2).map(([cycle, p2]) => {
+    // Primary entry candle = startMin + 75. Scalp entry = primary + 60 = startMin + 135.
+    const entryTs = startTs + (p2.startMin + 75 + SCALP_OFFSET_MIN) * 60;
+    const clockMin = (p2.startMin + 75 + SCALP_OFFSET_MIN + 18 * 60) % 1440;
+    const label = `${String(Math.floor(clockMin / 60)).padStart(2, "0")}:${String(clockMin % 60).padStart(2, "0")}`;
+    return { cycle, label, entryTs };
+  });
+  const today = buildEntries(dayStartTs);
+  const next = today.find(w => w.entryTs > nowTs);
+  if (next) return next;
+  return buildEntries(dayStartTs + 24 * 3600)[0];
+}
+
 // Phase 2 status for a given timestamp
 function getPhase2Status(dayStartTs) {
   const p2 = getActivePhase2(dayStartTs);
@@ -347,6 +370,7 @@ function verifyOrphanedActives(marketKey, candles, currentActiveId = null, daily
   for (const item of log) {
     if (item.market !== marketKey) continue;
     if (currentActiveId && item.id === currentActiveId) continue;  // handled by reconcileActiveSetup
+    if (item.type === "scalp") continue;                           // scalps managed by processScalp
     if (item.status !== "ACTIVE" && item.status !== "WAITING_PHASE2") continue;
 
     // ── (1) WAITING_PHASE2 → trigger entry retroactively if window passed ──
@@ -903,6 +927,139 @@ function build90MinCycles(candles, dayStartTs) {
   return cycles;
 }
 
+// ── 5.625min Cycle Builder ────────────────────────────────────────────────────
+// 22.5M / 4 = 5.625min. 256 cycles per trading day. Used for SCALP signals only:
+// fires when a single-leg sweep aligns with the ACTIVE primary setup's direction.
+// Not a primary signal source — depends on a parent setup being ACTIVE.
+function build5MinCycles(candles, dayStartTs) {
+  const nowTs = Date.now() / 1000;
+  const cycles = {};
+  const CYCLE_MIN = 5.625;
+  const PREV_CYCLES = 4;
+  const todayCandles = candles.filter(c => {
+    const m = minsIntoDay(c.timestamp, dayStartTs);
+    return m >= -(PREV_CYCLES * CYCLE_MIN) && m < 1440;
+  });
+
+  for (const c of todayCandles) {
+    const m   = minsIntoDay(c.timestamp, dayStartTs);
+    const idx = Math.floor(m / CYCLE_MIN);
+    if (!cycles[idx]) {
+      const startTs = dayStartTs + idx * CYCLE_MIN * 60;
+      const endTs   = startTs + CYCLE_MIN * 60;
+      cycles[idx] = {
+        index: idx, startTs, endTs,
+        startTime: tsToETLabel(startTs),
+        endTime:   tsToETLabel(endTs),
+        complete:  endTs <= nowTs,
+        high: -Infinity, highTs: null,
+        low:   Infinity, lowTs:  null,
+        candleCount: 0,
+        hitHigh: null, hitLow: null,
+      };
+    }
+    const cyc = cycles[idx];
+    cyc.candleCount++;
+    if (c.high > cyc.high) { cyc.high = c.high; cyc.highTs = c.timestamp; }
+    if (c.low  < cyc.low)  { cyc.low  = c.low;  cyc.lowTs  = c.timestamp; }
+  }
+
+  for (const cyc of Object.values(cycles)) {
+    if (cyc.high === -Infinity) cyc.high = null;
+    if (cyc.low  ===  Infinity) cyc.low  = null;
+    if (cyc.high) cyc.highTime = tsToETLabel(cyc.highTs);
+    if (cyc.low)  cyc.lowTime  = tsToETLabel(cyc.lowTs);
+  }
+
+  const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+  for (const cyc of Object.values(cycles)) {
+    if (!cyc.complete || !cyc.high) continue;
+    for (const c of sorted.filter(c => c.timestamp >= cyc.endTs)) {
+      if (!cyc.hitHigh && c.high >= cyc.high)
+        cyc.hitHigh = { price: c.high, time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      if (!cyc.hitLow && c.low <= cyc.low)
+        cyc.hitLow  = { price: c.low,  time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      if (cyc.hitHigh && cyc.hitLow) break;
+    }
+  }
+
+  return cycles;
+}
+
+// Reference 5.625min cycle — same actionable-pick logic as 90M / 22.5M.
+// Sweep-sweep semantics: BUY needs BSL hit then SSL hit; SELL needs SSL then BSL.
+function getRef5MinCycle(cycles5M, dir) {
+  const arr = Object.values(cycles5M).filter(c => c.high != null && c.low != null)
+    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  if (!arr.length) return null;
+  const completed = [...arr].filter(c => c.complete).reverse();
+  if (completed.length) {
+    const best = findBestCandleRef(completed, dir);
+    if (best) return best;
+  }
+  return arr.filter(c => c.complete).pop() ?? arr[arr.length - 1];
+}
+
+// ── 22.5min Cycle Builder ─────────────────────────────────────────────────────
+// 90M / 4 = 22.5min. 64 cycles per trading day. Same structure as build90MinCycles
+// but driven by 1m candles (15m candles give insufficient resolution: only ~1.5
+// candles per cycle). BSL/SSL = high/low of completed cycles, identical sweep
+// detection semantics as 90M/6H.
+function build22MinCycles(candles, dayStartTs) {
+  const nowTs = Date.now() / 1000;
+  const cycles = {};
+  const CYCLE_MIN = 22.5;
+  const PREV_CYCLES = 3;
+  const todayCandles = candles.filter(c => {
+    const m = minsIntoDay(c.timestamp, dayStartTs);
+    return m >= -(PREV_CYCLES * CYCLE_MIN) && m < 1440;
+  });
+
+  for (const c of todayCandles) {
+    const m   = minsIntoDay(c.timestamp, dayStartTs);
+    const idx = Math.floor(m / CYCLE_MIN);
+    if (!cycles[idx]) {
+      const startTs = dayStartTs + idx * CYCLE_MIN * 60;
+      const endTs   = startTs + CYCLE_MIN * 60;
+      cycles[idx] = {
+        index: idx, startTs, endTs,
+        startTime: tsToETLabel(startTs),
+        endTime:   tsToETLabel(endTs),
+        complete:  endTs <= nowTs,
+        high: -Infinity, highTs: null,
+        low:   Infinity, lowTs:  null,
+        candleCount: 0,
+        hitHigh: null, hitLow: null,
+      };
+    }
+    const cyc = cycles[idx];
+    cyc.candleCount++;
+    if (c.high > cyc.high) { cyc.high = c.high; cyc.highTs = c.timestamp; }
+    if (c.low  < cyc.low)  { cyc.low  = c.low;  cyc.lowTs  = c.timestamp; }
+  }
+
+  for (const cyc of Object.values(cycles)) {
+    if (cyc.high === -Infinity) cyc.high = null;
+    if (cyc.low  ===  Infinity) cyc.low  = null;
+    if (cyc.high) cyc.highTime = tsToETLabel(cyc.highTs);
+    if (cyc.low)  cyc.lowTime  = tsToETLabel(cyc.lowTs);
+  }
+
+  const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+  for (const cyc of Object.values(cycles)) {
+    if (!cyc.complete || !cyc.high) continue;
+    for (const c of sorted.filter(c => c.timestamp >= cyc.endTs)) {
+      if (!cyc.hitHigh && c.high >= cyc.high)
+        cyc.hitHigh = { price: c.high, time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      if (!cyc.hitLow && c.low <= cyc.low)
+        cyc.hitLow  = { price: c.low,  time: tsToETLabel(c.timestamp), ts: c.timestamp };
+      if (cyc.hitHigh && cyc.hitLow) break;
+    }
+  }
+
+  return cycles;
+}
+
 // ── 6H Cycle Builder ──────────────────────────────────────────────────────────
 function build6HCycles(candles, dayStartTs) {
   const nowTs = Date.now() / 1000;
@@ -1045,6 +1202,19 @@ function getRef90MinCycle(cycles90, dir) {
     ?? arr[arr.length - 1];
 }
 
+// 22.5min: same actionable-pick logic as 90M, scaled to 22.5min cadence.
+function getRef22MinCycle(cycles22M, dir) {
+  const arr = Object.values(cycles22M).filter(c => c.high != null && c.low != null)
+    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  if (!arr.length) return null;
+  const completed = [...arr].filter(c => c.complete).reverse();
+  if (completed.length) {
+    const best = findBestCandleRef(completed, dir);
+    if (best) return best;
+  }
+  return arr.filter(c => c.complete).pop() ?? arr[arr.length - 1];
+}
+
 // 6H: scan all completed cycles (most recent first), pick the most actionable one.
 function getRef6HCycle(cycles6H, dir) {
   const entries = Object.entries(cycles6H);
@@ -1124,29 +1294,38 @@ function getRefDailyDay(dailyDays, allowedDirection) {
 // ── Card Signal Detector ──────────────────────────────────────────────────────
 // Fires events for the REFERENCE cycle only (same cycle the UI cards show).
 // Returns { events, newState } — only fires when allowedDirection is set.
-function detectCardSignals(cycles90, cycles6H, dailyDays, allowedDirection, prevState) {
+function detectCardSignals(cycles90, cycles6H, dailyDays, allowedDirection, prevState, adminBias = "AUTO") {
   const events  = [];
   const newState = JSON.parse(JSON.stringify(prevState));
 
+  // Primary signal sources: 90M and 6H only. 22.5M and 5.625M are scalps (via
+  // processScalp); Daily is removed (only 6H/90M as primary setup candidates).
   const refs = {
     "90min": getRef90MinCycle(cycles90, allowedDirection),
     "6H":    getRef6HCycle(cycles6H, allowedDirection),
-    "daily": getRefDailyDay(dailyDays, allowedDirection),
   };
 
   // Sweeps older than 30 min are pre-marked as alerted when we switch to a new ref.
   // This prevents re-firing Discord alerts for historical sweeps found via the extended lookback.
-  const RECENT_TS = Date.now() / 1000 - 30 * 60;
+  // EXCEPTION: when admin manually sets bias to BULLISH/BEARISH, treat all
+  // sweeps in the current ref as fresh — the admin signaled intent right now,
+  // so historical sweeps that would otherwise be skipped should still create
+  // setups. prevState still prevents double-firing across ticks.
+  const isManualBias = adminBias === "BULLISH" || adminBias === "BEARISH";
+  const RECENT_TS = isManualBias ? -Infinity : (Date.now() / 1000 - 30 * 60);
 
   for (const [tf, ref] of Object.entries(refs)) {
     if (!ref || !allowedDirection) continue;
 
-    const cycleKey   = tf === "90min" ? ref.startTime : tf === "6H" ? ref.name : ref.date;
-    const cycleLabel = tf === "90min" ? `${ref.startTime}–${ref.endTime ?? "now"}`
+    const cycleKey   = (tf === "90min" || tf === "22.5min") ? ref.startTime
+                     : tf === "6H" ? ref.name
+                     : ref.date;
+    const cycleLabel = (tf === "90min" || tf === "22.5min") ? `${ref.startTime}–${ref.endTime ?? "now"}`
                      : tf === "6H"   ? (ref.label ?? ref.name)
                      :                 ref.date;
 
     // Reset state when reference cycle changes — suppress alerts for already-old sweeps
+    // (RECENT_TS = -Infinity when manual bias, so all hits stay un-sent).
     if (!newState[tf] || newState[tf].cycleKey !== cycleKey) {
       newState[tf] = {
         cycleKey,
@@ -1237,6 +1416,23 @@ async function saveSetup(marketKey, setup) {
   }
 }
 
+// ── Scalp persistence (one slot per (market × cycle-tf)) ─────────────────────
+// Scalps are sub-cycle sweep-sweep entries (22.5M + 5.625M) that piggyback on
+// an ACTIVE primary setup. Each cycle-tf has its own file slot so 22.5M and
+// 5.625M scalps can be open simultaneously per market.
+function scalpFilePath(marketKey, tf) {
+  return join(__dir, `scalp_${tf}_${marketKey}.json`);
+}
+async function loadScalp(marketKey, tf) {
+  return readJSON(scalpFilePath(marketKey, tf), null);
+}
+async function saveScalp(marketKey, tf, scalp) {
+  writeJSON(scalpFilePath(marketKey, tf), scalp);
+}
+async function clearScalp(marketKey, tf) {
+  try { unlinkSync(scalpFilePath(marketKey, tf)); } catch {}
+}
+
 async function clearSetup(marketKey, setup = null, reason = null) {
   try { unlinkSync(setupFilePath(marketKey)); } catch {}
   const db = await getDB();
@@ -1259,6 +1455,270 @@ async function clearSetup(marketKey, setup = null, reason = null) {
       });
     }
   }
+}
+
+// ── Scalp lifecycle (generic over cycle-tf) ──────────────────────────────────
+// processScalp runs every tick per (market × cycle-tf). Two responsibilities:
+//   1) Settle existing scalp (TP1/TP2/SL/parent-cancelled) vs 1m candles.
+//   2) Detect new scalp pending when slot free + parent ACTIVE + lock-bias-
+//      direction sweep-sweep on this cycle-tf.
+// Called once for cycleTf="22.5min" and once for cycleTf="5.625min".
+async function processScalp({ marketKey, activeSetup, activeScalp, cycles, cycleTf, cycleSource, candles1m, allowedDirection, onUpdate }) {
+  if (!candles1m?.length) return;
+  const sortedC = [...candles1m].sort((a, b) => a.timestamp - b.timestamp);
+  const dayStartTs = getTradingDayStartTs();
+
+  // 0. PENDING_ENTRY → ACTIVE: scalp waits for the +1h scalp entry window 1m
+  //    candle to open, then enters at that candle's open. SL via computeSweepSL
+  //    (lowest low / highest high in step2Ts→entryTs window) for accurate stop.
+  if (activeScalp && activeScalp.status === "PENDING_ENTRY") {
+    const entryCandle = sortedC.find(c => c.timestamp === activeScalp.scalpEntryWindowTs);
+    if (entryCandle) {
+      const dec = entryCandle.open > 100 ? 1 : 5;
+      const entry = +entryCandle.open.toFixed(dec);
+      const sl = computeSweepSL({
+        direction:  activeScalp.direction,
+        candles:    sortedC, // 1m candles for tight scalp SL
+        step2Ts:    activeScalp.step2Ts,
+        entryTs:    entryCandle.timestamp,
+        entryPrice: entry,
+        sweepPrice: activeScalp.sweepPrice,
+      });
+      const isBuy = activeScalp.direction === "BUY";
+      const risk = Math.abs(entry - sl);
+      if (risk > 0) {
+        const tp1 = +(isBuy ? entry + 5 * risk : entry - 5 * risk).toFixed(dec);
+        const tp2 = +(isBuy ? entry + 8 * risk : entry - 8 * risk).toFixed(dec);
+        activeScalp = {
+          ...activeScalp,
+          status: "ACTIVE",
+          entry, sl, tp1, tp2,
+          risk: +risk.toFixed(dec),
+          entryTime: tsToETLabel(entryCandle.timestamp),
+          entryTs:   entryCandle.timestamp * 1000,
+          tp1Hit: false, tp2Hit: false,
+          livePnl: 0, liveRMulti: 0,
+        };
+        await saveScalp(marketKey, cycleTf, activeScalp);
+        patchSetupLog(activeScalp.id, {
+          status: "ACTIVE", entry, sl, tp1, tp2,
+          entryTime: activeScalp.entryTime, entryTs: activeScalp.entryTs,
+        });
+        await sendDiscordScalpActivated(marketKey, activeScalp);
+        logEvent(marketKey, "SCALP_ACTIVATED",
+          `${activeScalp.direction} entry ${entry} SL ${sl} TP1 ${tp1} (5R) TP2 ${tp2} (8R) @ scalp window ${activeScalp.scalpEntryWindow}`,
+          "scalp_active");
+        // CopyFactory: replicate scalp to subscribers (paper-mode in staging
+        // because COPY_LIVE=false; logged-only). Live env flips it on.
+        try { await cfNotifySignal(activeScalp, marketKey); }
+        catch (e) { console.warn(`[CF] scalp notify failed: ${e.message}`); }
+        onUpdate(activeScalp);
+      } else {
+        activeScalp = { ...activeScalp, status: "CANCELLED", cancelReason: "zero_risk" };
+        await saveScalp(marketKey, cycleTf, activeScalp);
+        patchSetupLog(activeScalp.id, { status: "CANCELLED", cancelReason: "zero_risk" });
+        onUpdate(activeScalp);
+      }
+    } else if (Date.now() / 1000 > activeScalp.scalpEntryWindowTs + 90) {
+      // 1.5 min after window — cancel; we missed the entry candle
+      activeScalp = { ...activeScalp, status: "CANCELLED", cancelReason: "window_missed",
+        cancelTime: tsToETLabel(Date.now() / 1000) };
+      await saveScalp(marketKey, cycleTf, activeScalp);
+      patchSetupLog(activeScalp.id, { status: "CANCELLED", cancelReason: "window_missed" });
+      logEvent(marketKey, "SCALP_CANCELLED",
+        `Scalp window ${activeScalp.scalpEntryWindow} ET passed without 1m candle`, "scalp_cancelled");
+      onUpdate(activeScalp);
+    }
+  }
+
+  // PENDING parent-close cancel — don't keep waiting if primary is gone
+  if (activeScalp && activeScalp.status === "PENDING_ENTRY" && activeSetup?.status !== "ACTIVE") {
+    activeScalp = { ...activeScalp, status: "CANCELLED", cancelReason: "parent_closed",
+      cancelTime: tsToETLabel(Date.now() / 1000) };
+    await saveScalp(marketKey, cycleTf, activeScalp);
+    patchSetupLog(activeScalp.id, { status: "CANCELLED", cancelReason: "parent_closed" });
+    logEvent(marketKey, "SCALP_CANCELLED", `Parent ${activeScalp.parentSource} closed before scalp window`, "scalp_cancelled");
+    onUpdate(activeScalp);
+  }
+
+  // 1. Settle existing ACTIVE scalp
+  if (activeScalp && activeScalp.status === "ACTIVE") {
+    const oc = verifyScalpOutcome({ scalp: activeScalp, candles: sortedC });
+    if (oc.outcome === "WIN_TP2") {
+      activeScalp = { ...activeScalp, status: "CLOSED_TP2", tp1Hit: true, tp2Hit: true,
+        exitTime: oc.hitTs ? tsToETLabel(oc.hitTs) : null, exitPrice: oc.hitPrice,
+        outcome: "WIN", rMulti: 8 };
+      await saveScalp(marketKey, cycleTf, activeScalp);
+      patchSetupLog(activeScalp.id, { status: "CLOSED_TP2", outcome: "WIN", rMulti: 8 });
+      await sendDiscordScalpEvent(marketKey, activeScalp, "TP2");
+      logEvent(marketKey, "SCALP_TP2", `${activeScalp.direction} TP2 (8R) @ ${oc.hitPrice}`, "scalp_closed");
+      onUpdate(activeScalp);
+    } else if (oc.outcome === "WIN_TP1_THEN_SL") {
+      activeScalp = { ...activeScalp, status: "CLOSED_TP1", tp1Hit: true, tp2Hit: false,
+        exitTime: oc.hitTs ? tsToETLabel(oc.hitTs) : null, exitPrice: oc.hitPrice,
+        outcome: "WIN", rMulti: 5 };
+      await saveScalp(marketKey, cycleTf, activeScalp);
+      patchSetupLog(activeScalp.id, { status: "CLOSED_TP1", outcome: "WIN", rMulti: 5 });
+      await sendDiscordScalpEvent(marketKey, activeScalp, "TP1");
+      logEvent(marketKey, "SCALP_TP1", `${activeScalp.direction} TP1 (5R) → SL @ ${oc.hitPrice}`, "scalp_closed");
+      onUpdate(activeScalp);
+    } else if (oc.outcome === "LOSS") {
+      activeScalp = { ...activeScalp, status: "CLOSED_SL", exitTime: oc.hitTs ? tsToETLabel(oc.hitTs) : null,
+        exitPrice: oc.hitPrice, outcome: "LOSS", rMulti: -1 };
+      await saveScalp(marketKey, cycleTf, activeScalp);
+      patchSetupLog(activeScalp.id, { status: "CLOSED_SL", outcome: "LOSS", rMulti: -1 });
+      await sendDiscordScalpEvent(marketKey, activeScalp, "SL");
+      logEvent(marketKey, "SCALP_SL", `${activeScalp.direction} SL @ ${oc.hitPrice}`, "scalp_closed");
+      onUpdate(activeScalp);
+    } else {
+      // Still open — refresh live progress for dashboard
+      const last = sortedC[sortedC.length - 1];
+      if (last) {
+        const isBuy = activeScalp.direction === "BUY";
+        const pnl = isBuy ? last.close - activeScalp.entry : activeScalp.entry - last.close;
+        const rMulti = activeScalp.risk ? +(pnl / activeScalp.risk).toFixed(2) : 0;
+        const dec = activeScalp.entry > 100 ? 1 : 5;
+        activeScalp = { ...activeScalp, livePnl: +pnl.toFixed(dec), liveRMulti: rMulti, lastTickTs: Date.now() };
+        await saveScalp(marketKey, cycleTf, activeScalp);
+        onUpdate(activeScalp);
+      }
+    }
+    // Parent closed while scalp still open → cancel (don't run scalps without parent)
+    if (activeScalp.status === "ACTIVE" && activeSetup?.status !== "ACTIVE") {
+      activeScalp = { ...activeScalp, status: "CANCELLED", cancelReason: "parent_closed",
+        cancelTime: tsToETLabel(Date.now() / 1000) };
+      await saveScalp(marketKey, cycleTf, activeScalp);
+      patchSetupLog(activeScalp.id, { status: "CANCELLED", cancelReason: "parent_closed" });
+      logEvent(marketKey, "SCALP_CANCELLED", `Parent ${activeScalp.parentSource} closed`, "scalp_cancelled");
+      onUpdate(activeScalp);
+    }
+  }
+
+  // 2. Create a new PENDING_ENTRY scalp. Same trigger criteria as the other cards:
+  //    sweep-sweep pattern (BUY: BSL→SSL, SELL: SSL→BSL) on the 5.625M cycle,
+  //    direction from lock bias (allowedDirection). Scalp gate: parent must be
+  //    ACTIVE in the SAME direction so we never scalp against the primary trade.
+  const slotFree = !activeScalp || activeScalp.status?.startsWith("CLOSED_") || activeScalp.status === "CANCELLED";
+  if (!slotFree) return;
+  if (!allowedDirection) return; // No lock bias → no scalp
+  if (!activeSetup || activeSetup.status !== "ACTIVE" || activeSetup.direction !== allowedDirection) return;
+
+  const ref = getRef5MinCycle(cycles, allowedDirection); // generic — works on any cycle obj
+  if (!ref) return;
+
+  // Sweep-sweep validation. BUY: step1 = BSL hit, step2 = SSL hit. SELL inverse.
+  // Both must be present AND step1Ts < step2Ts (correct order).
+  const isBuy = allowedDirection === "BUY";
+  const step1Hit = isBuy ? ref.hitHigh : ref.hitLow;
+  const step2Hit = isBuy ? ref.hitLow  : ref.hitHigh;
+  if (!step1Hit || !step2Hit) return;
+  if (!step1Hit.ts || !step2Hit.ts || step1Hit.ts >= step2Hit.ts) return;
+
+  // Anti-dup: don't re-fire on same parent+cycle
+  const cycleKey = `${activeSetup.id}::${ref.startTime}`;
+  if (activeScalp && activeScalp.cycleKey === cycleKey) return;
+  // Recency: ignore stale step-2 sweeps (>30 min old)
+  if (Date.now() / 1000 - step2Hit.ts > 30 * 60) return;
+
+  // Find the next scalp entry window (+1h offset from primary windows)
+  const scalpWin = getNextScalpEntryWindow(dayStartTs);
+  if (!scalpWin) return;
+
+  const scalp = {
+    id: `${marketKey}-${cycleSource}-SCALP-${Date.now()}`,
+    market: marketKey,
+    type: "scalp",
+    parentSetupId: activeSetup.id,
+    parentSource:  activeSetup.source,
+    direction:     allowedDirection,
+    tf: cycleTf,
+    source: cycleSource,
+    cycleKey,
+    cycleLabel: `${ref.startTime}–${ref.endTime ?? "now"}`,
+    bslLevel:   ref.high,
+    sslLevel:   ref.low,
+    step1Time:  step1Hit.time,
+    step1Ts:    step1Hit.ts,
+    step2Time:  step2Hit.time,
+    step2Ts:    step2Hit.ts,
+    sweepPrice: step2Hit.price, // step-2 sweep depth (used by computeSweepSL)
+    sweepTime:  step2Hit.time,
+    scalpEntryWindow:   scalpWin.label,    // "03:45" / "09:45" / "15:45" / "21:45"
+    scalpEntryWindowTs: scalpWin.entryTs,
+    // entry/sl/tp1/tp2 filled when window's 1m candle arrives (step 0 above)
+    entry: null, sl: null, tp1: null, tp2: null,
+    rrTp1: 5, rrTp2: 8,
+    status: "PENDING_ENTRY",
+    createdTime: tsToETLabel(Date.now() / 1000),
+    createdTs: Date.now(),
+  };
+  await saveScalp(marketKey, cycleTf, scalp);
+
+  const log = readJSON(SETUP_LOG_FILE, []);
+  log.unshift({
+    ...scalp,
+    side:     isBuy ? "LOW" : "HIGH",
+    datetime: tsToETDateTime(Date.now() / 1000),
+    ts:       Date.now(),
+  });
+  writeJSON(SETUP_LOG_FILE, log.slice(0, 10000));
+
+  await sendDiscordScalpReady(marketKey, scalp);
+  logEvent(marketKey, "SCALP_PENDING",
+    `${scalp.direction} | parent ${activeSetup.source} | step1 ${step1Hit.time} → step2 ${step2Hit.time} | scalp entry ${scalpWin.label} ET (+1h)`,
+    "scalp_pending");
+  onUpdate(scalp);
+}
+
+function verifyScalpOutcome({ scalp, candles }) {
+  const { direction, entryTs, sl, tp1, tp2 } = scalp;
+  const isBuy = direction === "BUY";
+  const post = candles.filter(c => c.timestamp > (entryTs / 1000));
+  let tp1Hit = false;
+  for (const c of post) {
+    const slBroken  = isBuy ? c.low  <= sl  : c.high >= sl;
+    const tp2Broken = isBuy ? c.high >= tp2 : c.low  <= tp2;
+    const tp1Broken = isBuy ? c.high >= tp1 : c.low  <= tp1;
+    if (tp2Broken && (!slBroken || tp1Hit))
+      return { outcome: "WIN_TP2", hitTs: c.timestamp, hitPrice: tp2 };
+    if (tp1Broken) tp1Hit = true;
+    if (slBroken) {
+      if (tp1Hit) return { outcome: "WIN_TP1_THEN_SL", hitTs: c.timestamp, hitPrice: sl };
+      return { outcome: "LOSS", hitTs: c.timestamp, hitPrice: sl };
+    }
+  }
+  return { outcome: null };
+}
+
+async function sendDiscordScalpReady(market, scalp) {
+  if (!DISCORD_WEBHOOK) return;
+  const dec = scalp.sweepPrice > 100 ? 1 : 5;
+  const msg = `⏳ **${market}** · SCALP READY — ${scalp.direction} (1:${scalp.rrTp1}/${scalp.rrTp2} R:R)\n` +
+              `Parent ${scalp.parentSource} ACTIVE · Sweep @ ${scalp.sweepTime} (${scalp.sweepPrice.toFixed(dec)}) · Wachten op entry window **${scalp.scalpEntryWindow}** ET (+1h)`;
+  await _sendNotify(msg);
+  console.log(`[DISCORD] Scalp READY: ${market} ${scalp.direction} → ${scalp.scalpEntryWindow}`);
+}
+
+async function sendDiscordScalpActivated(market, scalp) {
+  if (!DISCORD_WEBHOOK) return;
+  const dec = scalp.entry > 100 ? 1 : 5;
+  const msg = `⚡ **${market}** · SCALP TRIGGERED — ${scalp.direction} (1:${scalp.rrTp1}/${scalp.rrTp2} R:R)\n` +
+              `Entry ${scalp.entry.toFixed(dec)} (open @ ${scalp.scalpEntryWindow}) · SL ${scalp.sl.toFixed(dec)} · TP1 ${scalp.tp1.toFixed(dec)} (5R) · TP2 ${scalp.tp2.toFixed(dec)} (8R)`;
+  await _sendNotify(msg);
+  console.log(`[DISCORD] Scalp ACTIVATED: ${market} ${scalp.direction}`);
+}
+
+async function sendDiscordScalpEvent(market, scalp, eventType) {
+  if (!DISCORD_WEBHOOK) return;
+  const dec = scalp.entry > 100 ? 1 : 5;
+  const labels = {
+    TP2: `🏆 SCALP TP2 hit — 8R win`,
+    TP1: `✅ SCALP TP1 hit (5R) → stopped at SL`,
+    SL:  `🛑 SCALP SL hit — full loss`,
+  };
+  const exit = scalp.exitPrice != null ? scalp.exitPrice.toFixed(dec) : "?";
+  await _sendNotify(`**${market}** ${labels[eventType]}: ${scalp.direction} entry ${scalp.entry.toFixed(dec)} → ${exit}`);
+  console.log(`[DISCORD] Scalp ${eventType}: ${market}`);
 }
 
 // Verify the stored setup status against actual candle data.
@@ -1344,7 +1804,7 @@ function updateWeeklyRecap(marketKey, event) {
 
 // ── Discord ───────────────────────────────────────────────────────────────────
 
-const DASHBOARD_URL = "http://178.104.80.233:8082/dashboard";
+const DASHBOARD_URL = process.env.DASHBOARD_URL || env.DASHBOARD_URL || "http://178.104.80.233:8082/dashboard";
 
 function _fp(p) {
   if (p == null) return "—";
@@ -1425,8 +1885,6 @@ function checkEntryZoneFilter(setup, dailyEq, sixHEq) {
   }
   // Per user request: only ONE of daily/6H needs to be in the right zone for
   // the entry to fire (loose OR — was strict AND in the previous revision).
-  // The journal's pdAligned snapshot tracks the same loose criterion so stats
-  // reflect what the filter actually let through.
   const sp = setup.sweepPrice;
   if (setup.direction === "BUY") {
     const inDailyDiscount = sp < dailyEq;
@@ -1454,7 +1912,7 @@ function checkEntryZoneFilter(setup, dailyEq, sixHEq) {
 // MUST call this. The function guarantees that flipping a setup to ACTIVE
 // always produces these effects together — so a path can never accidentally
 // fire one without the others (e.g. Discord without MetaApi, or card-update
-// without broker signal — the bug that caused BTC 02:45 ET 2026-05-03 to TP2
+// without broker signal, the bug that caused BTC 02:45 ET 2026-05-03 to TP2
 // without ever placing an order):
 //
 //   1. ENTRY_TRIGGERED logged → debug_log.json + monitor.log + dashboard event feed
@@ -1602,7 +2060,7 @@ async function mcpCall(method, params = {}) {
   return null;
 }
 
-async function switchToMarket(marketKey, retries = 5) {
+async function switchToMarket(marketKey, retries = 10) {
   const market = MARKETS[marketKey];
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -1856,7 +2314,7 @@ function isMarketOpen(marketKey) {
 }
 
 // ── Core Market Analysis ──────────────────────────────────────────────────────
-async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLockLevels = null) {
+async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLockLevels = null, candles1m = null) {
   const tag = `[${marketKey}]`;
   const dayStartTs = getTradingDayStartTs();
   const phaseInfo  = getPhase2Status(dayStartTs);
@@ -1865,6 +2323,11 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   // Build structures
   const cycles90  = build90MinCycles(candles, dayStartTs);
   const cycles6H  = build6HCycles(candles, dayStartTs);
+  // 22.5min cycles need 1m candles for resolution. Empty object if 1m feed missing
+  // (cron seeds candles_1m_<MK>.json every 2 min; first run after deploy may be empty).
+  const cycles22M = candles1m?.length ? build22MinCycles(candles1m, dayStartTs) : {};
+  // 5.625min cycles for SCALP signals. Same 1m feed.
+  const cycles5M  = candles1m?.length ? build5MinCycles(candles1m, dayStartTs) : {};
   // 18:00 ET session grouping — labels match D-candle convention (close date)
   const dailyDays = buildDailyStructure(candles);
 
@@ -1964,7 +2427,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   // ── Card signal detection (reference cycle per timeframe) ────────────────
   const prevCardState = loadCardState(marketKey);
   const { events: cardEvents, newState: updatedCardState } = detectCardSignals(
-    cycles90, cycles6H, dailyDays, allowedDirection, prevCardState
+    cycles90, cycles6H, dailyDays, allowedDirection, prevCardState, adminBias
   );
   saveCardState(marketKey, updatedCardState);
 
@@ -2221,7 +2684,29 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
     await sendDiscordStep1(marketKey, tf, direction, cycleLabel, ref.high, ref.low, hitTime);
   }
 
-  const completeEv = cardEvents.find(e => e.step === 2);
+  // Smart-pick: when multiple TFs fire step-2 in same tick, pick the one whose
+  // SL is positioned at the SAFEST extreme — furthest below entry for BUY,
+  // furthest above entry for SELL. SL ≈ sweep depth ± buffer (per lib-sl), so
+  // we rank by sweep depth: BUY → lowest swept low wins; SELL → highest swept high wins.
+  // Result: SL sits beyond all other TFs' stops, surviving more market noise.
+  const step2Events = cardEvents.filter(e => e.step === 2);
+  const completeEv = step2Events.length <= 1 ? step2Events[0] : step2Events
+    .map(ev => {
+      const isBuy = ev.direction === "BUY";
+      const swept = isBuy ? ev.ref.hitLow?.price : ev.ref.hitHigh?.price;
+      return { ev, swept };
+    })
+    .sort((a, b) => {
+      // BUY: ascending swept (lowest first = safest = furthest below entry).
+      // SELL: descending swept (highest first = safest = furthest above entry).
+      const isBuy = a.ev.direction === "BUY";
+      const av = a.swept ?? (isBuy ?  Infinity : -Infinity);
+      const bv = b.swept ?? (isBuy ?  Infinity : -Infinity);
+      return isBuy ? av - bv : bv - av;
+    })[0]?.ev;
+  if (step2Events.length > 1 && completeEv) {
+    console.log(`${tag} smart-pick: ${step2Events.length} step-2 events; picked ${completeEv.tf} (safest SL — furthest from entry)`);
+  }
   if (completeEv) {
     const { tf, direction, ref, cycleLabel } = completeEv;
     const isBuy      = direction === "BUY";
@@ -2246,6 +2731,24 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
         if (scanHit) step1Ts = scanHit.timestamp;
       }
     }
+    // Manual-bias bypass: when admin has explicitly set BULLISH/BEARISH, allow
+    // step-1 from a PRIOR cycle. Engine's default backscan only looks between
+    // cycle-end and step-2 (a tiny window), which rejects valid cross-cycle
+    // sweeps like "BSL hit at 17:00 in cycle A, SSL swept at 21:00 in cycle B".
+    // Under manual bias, the admin signaled directional intent so we accept
+    // any step-1 hit before step-2 within a reasonable lookback (24h).
+    if (!step1Ts && step2Ts && (adminBias === "BULLISH" || adminBias === "BEARISH")) {
+      const level = isBuy ? bslLevel : sslLevel;
+      const minTs = step2Ts - 24 * 3600;
+      const scanHit = candles
+        .filter(c => c.timestamp >= minTs && c.timestamp < step2Ts)
+        .sort((a, b) => b.timestamp - a.timestamp)  // most recent first
+        .find(c => isBuy ? c.high >= level : c.low <= level);
+      if (scanHit) {
+        step1Ts = scanHit.timestamp;
+        console.log(`${tag} manual-bias step-1 backscan: hit @ ${tsToETLabel(scanHit.timestamp)} (level=${level})`);
+      }
+    }
     // VALIDITY GATE: a valid sweep-sweep needs step 1 (level hit) BEFORE step 2
     // (opposite level swept). Without a confirmed, time-ordered step 1 this is
     // not a real sweep pattern — don't create a setup for it.
@@ -2259,7 +2762,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
     const step2Time  = step2Ts ? tsToETLabel(step2Ts) : (isBuy ? ref.hitLow?.time  : ref.hitHigh?.time);
     const entryPrice = isBuy ? sslLevel : bslLevel;
     const sweepPrice = isBuy ? ref.hitLow?.price : ref.hitHigh?.price;
-    const tfSrc      = tf === "90min" ? "90M" : tf;
+    const tfSrc      = tf === "90min" ? "90M" : tf === "22.5min" ? "22.5M" : tf;
 
     // Daily: entry fires on the OPEN of the next 06:00 ET candle strictly after
     // step-2 (no Phase2 window logic). 6H/90M: entry window opens at the 6H
@@ -2556,6 +3059,24 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   // pair gets one of them orphaned. Without this scan the orphan never closes.
   verifyOrphanedActives(marketKey, candles, activeSetup?.id ?? null, dailyEq, sixHEq);
 
+  // ── SCALP detection (22.5M + 5.625M sweep-sweep aligned with ACTIVE primary) ─
+  // Both cycle-tfs are scalps with +1h entry windows + 5R/8R TP. Independent
+  // slots — each market can have a 22.5M scalp AND a 5.625M scalp open at once.
+  let scalp22M = await loadScalp(marketKey, "22.5min");
+  await processScalp({
+    marketKey, activeSetup, activeScalp: scalp22M,
+    cycles: cycles22M, cycleTf: "22.5min", cycleSource: "22.5M",
+    candles1m, allowedDirection,
+    onUpdate: (s) => { scalp22M = s; },
+  });
+  let scalp5M = await loadScalp(marketKey, "5.625min");
+  await processScalp({
+    marketKey, activeSetup, activeScalp: scalp5M,
+    cycles: cycles5M, cycleTf: "5.625min", cycleSource: "5.6M",
+    candles1m, allowedDirection,
+    onUpdate: (s) => { scalp5M = s; },
+  });
+
   // ── Write market data for dashboard/API ───────────────────────────────────
   const lastCandle = candles[candles.length - 1];
   // Daily entry reference: the OPEN of the 06:00 ET candle on the current
@@ -2622,6 +3143,23 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
         complete: c.complete, high: c.high, low: c.low,
         hitHigh: c.hitHigh, hitLow: c.hitLow,
       })),
+    cycles22M: Object.values(cycles22M)
+      .sort((a, b) => a.index - b.index)
+      .slice(-12) // last ~4.5 hours of 22.5M cycles
+      .map(c => ({
+        index: c.index, startTime: c.startTime, endTime: c.endTime,
+        complete: c.complete, high: c.high, low: c.low,
+        hitHigh: c.hitHigh, hitLow: c.hitLow,
+      })),
+    cycles5M: Object.values(cycles5M)
+      .sort((a, b) => a.index - b.index)
+      .slice(-16) // last ~1.5 hours of 5.625M cycles
+      .map(c => ({
+        index: c.index, startTime: c.startTime, endTime: c.endTime,
+        complete: c.complete, high: c.high, low: c.low,
+        hitHigh: c.hitHigh, hitLow: c.hitLow,
+      })),
+    activeScalps: { "22.5min": scalp22M, "5.625min": scalp5M },
     dailyLevels: (() => {
       // Prefer D-TF levels (correct session boundaries matching user's chart).
       // D-candle labels are now close-date-aligned (+1 day fix in buildDailyLockMoves).
@@ -2694,7 +3232,17 @@ async function runMarket(marketKey) {
     // Persist candle cache — keep 3 weeks of 15-min bars (~2016 candles)
     writeJSON(join(__dir, `candles_${marketKey}.json`), candles.slice(-2016));
 
-    await analyzeMarket(marketKey, candles, dailyLockState, dailyLockLevels);
+    // 1m candles for 22.5M cycles — populated by fetch_candles cron (*/2 min in
+    // staging, FILTER_TFS=1). Sanitize to drop wrong-market contamination.
+    let candles1m = null;
+    try {
+      const raw = readFileSync(join(__dir, `candles_1m_${marketKey}.json`), "utf8");
+      candles1m = sanitizeCandles(JSON.parse(raw), marketKey);
+      const ageMin = candles1m.length ? (Date.now()/1000 - candles1m[candles1m.length-1].timestamp) / 60 : Infinity;
+      if (ageMin > 10) console.warn(`${tag} 1m candles ${ageMin.toFixed(1)} min old — 22.5M may be stale`);
+    } catch { /* file absent on first deploy — 22.5M cycles fall back to {} */ }
+
+    await analyzeMarket(marketKey, candles, dailyLockState, dailyLockLevels, candles1m);
 
   } catch (err) {
     console.error(`${tag} Error: ${err.message}`);
