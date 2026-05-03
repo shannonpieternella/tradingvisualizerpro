@@ -15,28 +15,72 @@ logger = logging.getLogger(__name__)
 
 
 class CDPSession:
-    """Persistent CDP WebSocket session with auto-reconnect."""
+    """Persistent CDP WebSocket session with auto-reconnect.
 
-    def __init__(self):
+    Each instance binds to ONE Chrome page target. Multiple instances pointing
+    to different tabs let us run truly parallel CDP traffic — no shared lock,
+    no chart-switch races. tab_index selects which TradingView tab to attach
+    to; if not enough tabs exist, connect() opens additional ones.
+    """
+
+    def __init__(self, tab_index: int = 0, target_url_filter: str = "tradingview.com",
+                 new_tab_url: str = "https://www.tradingview.com/chart/"):
+        self.tab_index = tab_index
+        self.target_url_filter = target_url_filter
+        self.new_tab_url = new_tab_url
         self.ws = None
         self._msg_id = 0
         self._pending: Dict[int, asyncio.Future] = {}
         self._listen_task: Optional[asyncio.Task] = None
         self._lock = asyncio.Lock()
+        self._target_id: Optional[str] = None
+
+    async def _list_targets(self, client: httpx.AsyncClient) -> List[dict]:
+        resp = await client.get("http://localhost:9222/json/list")
+        return resp.json()
+
+    def _matching_pages(self, targets: List[dict]) -> List[dict]:
+        # Stable order: sort by id so tab_index → same physical tab across
+        # reconnects (Chrome's /json/list order is otherwise insertion-based).
+        pages = [
+            t for t in targets
+            if t.get("type") == "page"
+            and self.target_url_filter in (t.get("url") or "")
+        ]
+        return sorted(pages, key=lambda t: t.get("id", ""))
+
+    async def _ensure_tab(self, client: httpx.AsyncClient) -> dict:
+        """Pick the Nth matching tab; create new tabs until Nth exists."""
+        for spawn_attempt in range(self.tab_index + 1 + 2):  # +2 grace tries
+            targets = await self._list_targets(client)
+            pages = self._matching_pages(targets)
+            if len(pages) > self.tab_index:
+                return pages[self.tab_index]
+            # Need more tabs. Chrome /json/new opens via PUT (older builds)
+            # or GET (newer). Try PUT first, fall back to GET.
+            url = f"http://localhost:9222/json/new?{self.new_tab_url}"
+            try:
+                await client.put(url)
+            except Exception:
+                try:
+                    await client.get(url)
+                except Exception as e:
+                    logger.warning("CDP /json/new failed: %s", e)
+            # Give the new tab a moment to load TradingView chart shell so
+            # subsequent execute_js() calls don't race the page bootstrap.
+            await asyncio.sleep(4.0)
+        raise RuntimeError(
+            f"CDP: could not find/create tab_index={self.tab_index} "
+            f"matching '{self.target_url_filter}'"
+        )
 
     async def connect(self, retries: int = 15, delay: float = 2.0):
         for attempt in range(retries):
             try:
-                async with httpx.AsyncClient(timeout=5) as client:
-                    resp = await client.get("http://localhost:9222/json/list")
-                    targets = resp.json()
+                async with httpx.AsyncClient(timeout=15) as client:
+                    page = await self._ensure_tab(client)
 
-                page = next(
-                    (t for t in targets if t.get("type") == "page"), None
-                )
-                if not page:
-                    raise RuntimeError("No page target in Chrome CDP")
-
+                self._target_id = page.get("id")
                 ws_url = page["webSocketDebuggerUrl"]
                 self.ws = await websockets.connect(
                     ws_url,
@@ -49,14 +93,19 @@ class CDPSession:
                 self._listen_task = asyncio.create_task(self._listen())
                 await self.send("Page.enable")
                 await self.send("Runtime.enable")
-                logger.info("CDP connected to: %s", ws_url)
+                logger.info("CDP connected (tab_index=%d, target=%s): %s",
+                            self.tab_index, self._target_id, ws_url)
                 return
             except Exception as exc:
                 if attempt < retries - 1:
-                    logger.warning("CDP connect attempt %d failed: %s", attempt + 1, exc)
+                    logger.warning("CDP connect attempt %d failed (tab=%d): %s",
+                                   attempt + 1, self.tab_index, exc)
                     await asyncio.sleep(delay)
                 else:
-                    raise RuntimeError(f"CDP connect failed after {retries} attempts: {exc}")
+                    raise RuntimeError(
+                        f"CDP connect failed after {retries} attempts "
+                        f"(tab_index={self.tab_index}): {exc}"
+                    )
 
     async def _listen(self):
         try:

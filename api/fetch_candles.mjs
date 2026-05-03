@@ -18,7 +18,10 @@ try {
 } catch {}
 
 const MCP_TOKEN = process.env.MCP_TOKEN || env.MCP_TOKEN;
-const MCP_URL   = "https://178-104-80-233.sslip.io/mcp";
+// MCP_URL override-able via env so the 1m fetch cron can target the fast-lane
+// endpoint (/mcp-fast → tab #1) and stop competing with monitor.js for the
+// main MCP/CDP lock. Defaults to the original /mcp for backwards compat.
+const MCP_URL   = process.env.MCP_URL || env.MCP_URL || "https://178-104-80-233.sslip.io/mcp";
 const headers   = {
   "Content-Type": "application/json",
   "Accept": "application/json, text/event-stream",

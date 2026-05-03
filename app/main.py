@@ -31,8 +31,9 @@ BASE_DIR = Path(__file__).parent.parent
 MEMORY_DIR = BASE_DIR / "memory"
 CRON_DIR   = BASE_DIR / "cron"
 
-cdp     = CDPSession()
-memory  = MemoryManager(str(MEMORY_DIR))
+cdp      = CDPSession(tab_index=0)        # main tab — used by /mcp (existing)
+cdp_fast = CDPSession(tab_index=1)        # fast lane tab — used by /mcp-fast for high-frequency 1m fetches
+memory   = MemoryManager(str(MEMORY_DIR))
 agent: ClaudeAgent | None = None
 scheduler: TradingScheduler | None = None
 
@@ -56,17 +57,33 @@ def make_isolated_agent() -> ClaudeAgent:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global agent, scheduler
-    logger.info("Startup: connecting CDP...")
+    logger.info("Startup: connecting CDP (main tab)...")
     try:
         await cdp.connect(retries=20, delay=3.0)
         current_url = await cdp.execute_js("location.href")
         if "tradingview.com" not in str(current_url):
-            logger.info("CDP connected. Navigating to TradingView...")
+            logger.info("CDP main connected. Navigating to TradingView...")
             await cdp.navigate("https://www.tradingview.com/chart/", wait=5.0)
         else:
-            logger.info("CDP connected. Already on TradingView (%s), skipping navigate.", current_url)
+            logger.info("CDP main connected. Already on TradingView (%s), skipping navigate.", current_url)
     except Exception as e:
-        logger.error("CDP startup error: %s", e)
+        logger.error("CDP main startup error: %s", e)
+
+    # Fast lane — second TradingView tab dedicated to high-frequency 1m fetches.
+    # Connecting will spawn the tab if it doesn't exist yet (CDPSession.connect
+    # → _ensure_tab → /json/new). Failure here is non-fatal — falls back to
+    # global lock contention on the main tab, same as before this change.
+    logger.info("Startup: connecting CDP (fast tab)...")
+    try:
+        await cdp_fast.connect(retries=10, delay=3.0)
+        cur_fast = await cdp_fast.execute_js("location.href")
+        if "tradingview.com" not in str(cur_fast):
+            logger.info("CDP fast connected. Navigating to TradingView...")
+            await cdp_fast.navigate("https://www.tradingview.com/chart/", wait=5.0)
+        else:
+            logger.info("CDP fast connected. Already on TradingView (%s), skipping navigate.", cur_fast)
+    except Exception as e:
+        logger.error("CDP fast startup error (fast lane disabled): %s", e)
 
     scheduler = TradingScheduler(
         jobs_file=str(CRON_DIR / "jobs.json"),
@@ -97,11 +114,23 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_keepalive_qwen())
 
     mcp_token = os.getenv("MCP_TOKEN", "")
+
+    # Fast-lane MCP — same factory, different CDP instance (tab #1). FastMCP
+    # serves its routes at internal /mcp; mounting at "/fast" makes it
+    # reachable at /fast/mcp. nginx then exposes that as /mcp-fast externally.
+    mcp_fast_asgi, mcp_fast_session_manager = build_mcp_app(
+        cdp_fast, memory, scheduler, token=mcp_token or None
+    )
+    app.mount("/fast", mcp_fast_asgi)
+    logger.info("MCP fast lane mounted at /fast/mcp (tab_index=1)")
+
     mcp_asgi, mcp_session_manager = build_mcp_app(cdp, memory, scheduler, token=mcp_token or None)
-    # Streamable HTTP app has internal route /mcp, mount at root so full path = /mcp
+    # Streamable HTTP app has internal route /mcp, mount at root so full path = /mcp.
+    # MUST be mounted AFTER /fast — root catch-all otherwise shadows sub-paths.
     app.mount("/", mcp_asgi)
-    logger.info("MCP server mounted at /mcp (token %s)", "set" if mcp_token else "NOT SET")
-    async with mcp_session_manager.run():
+    logger.info("MCP main mounted at /mcp (tab_index=0, token %s)", "set" if mcp_token else "NOT SET")
+
+    async with mcp_session_manager.run(), mcp_fast_session_manager.run():
         yield
 
     scheduler.stop()
