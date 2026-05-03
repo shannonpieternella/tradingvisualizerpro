@@ -100,28 +100,28 @@ function OutcomeBadge({ outcome }) {
 }
 
 // Premium / Discount zone tag — small badge shown next to step-1 and step-2
-// sweep prices on the card. Aligned with the setup direction (BUY=discount,
-// SELL=premium) renders green; mis-aligned renders red. Falls back to neutral
-// when daily/6H eq aren't available yet (early in a session).
+// sweep prices on the card. Mirrors the server-side filter: aligned when the
+// sweep falls in the right zone of EITHER daily OR 6H (loose OR). Aligned
+// renders green/orange (per zone), mis-aligned (neither side) renders neutral.
 function ZoneTag({ price, dailyEq, sixHEq, direction }) {
   if (price == null || (dailyEq == null && sixHEq == null)) return null;
   const zoneOf = (eq) => eq == null ? null : (price < eq ? "DISCOUNT" : "PREMIUM");
   const dZone = zoneOf(dailyEq);
   const hZone = zoneOf(sixHEq);
-  const same  = dZone && hZone && dZone === hZone;
-  const primary = same ? dZone : (dZone ?? hZone);
+  const want  = direction === "BUY" ? "DISCOUNT" : direction === "SELL" ? "PREMIUM" : null;
+  const dailyAligned = want && dZone === want;
+  const sixHAligned  = want && hZone === want;
+  const aligned = dailyAligned || sixHAligned;  // OR — matches filter
+  // Display zone label: prefer the side that's aligned (so the visible badge
+  // explains WHY the entry passed). Falls back to whichever has data.
+  const primary = dailyAligned ? dZone : sixHAligned ? hZone : (dZone ?? hZone);
   if (!primary) return null;
-  const aligned = direction === "BUY"
-    ? primary === "DISCOUNT"
-    : direction === "SELL"
-      ? primary === "PREMIUM"
-      : false;
   const cls = `ls-zone-tag ls-zone-${primary === "DISCOUNT" ? "d" : "p"} ${aligned ? "ls-zone-aligned" : ""}`;
   const label = primary === "DISCOUNT" ? "💧 DISC" : "🔥 PREM";
-  const mixed = dZone && hZone && dZone !== hZone;
+  const split = dZone && hZone && dZone !== hZone;
   return (
-    <span className={cls} title={`Daily: ${dZone ?? "?"} | 6H: ${hZone ?? "?"}`}>
-      {label}{mixed ? " ⚠" : ""}
+    <span className={cls} title={`Daily: ${dZone ?? "?"} | 6H: ${hZone ?? "?"} (filter: 1 of 2)`}>
+      {label}{split ? (aligned ? " ✓" : " ✗") : ""}
     </span>
   );
 }
@@ -455,6 +455,31 @@ function entryWindowForSweepTime(timeStr) {
   } catch { return null; }
 }
 
+// Scalp entry windows = primary + 1h. Used by the 5.625min ⚡SCALP card.
+const SCALP_ENTRIES = [
+  { mins:  3 * 60 + 45, label: "03:45" },
+  { mins:  9 * 60 + 45, label: "09:45" },
+  { mins: 15 * 60 + 45, label: "15:45" },
+  { mins: 21 * 60 + 45, label: "21:45" },
+];
+function scalpEntryWindowForSweepTime(timeStr) {
+  if (!timeStr) return null;
+  try {
+    const [h, m] = timeStr.split(":").map(Number);
+    const mins = h * 60 + m;
+    const next = SCALP_ENTRIES.find(e => e.mins > mins);
+    return next ? next.label : "03:45";
+  } catch { return null; }
+}
+function nextScalpEntryWindowFromNow() {
+  try {
+    const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const mins = et.getHours() * 60 + et.getMinutes();
+    const next = SCALP_ENTRIES.find(e => e.mins > mins);
+    return next ? next.label : "03:45";
+  } catch { return "03:45"; }
+}
+
 // Fallback for cards still waiting on a sweep — preview the NEXT entry window
 // from current ET time so step 3 always shows when entry would fire.
 function nextEntryWindowFromNow() {
@@ -565,6 +590,67 @@ function build90MinSignal(md) {
 
   const best = findBestCandleRef(completed, dir) ?? mostRecent;
   return buildSignal(dir, md?.lockState?.strength, best.high, best.low, best.hitHigh, best.hitLow, `${best.startTime}–${best.endTime ?? "now"}`, null);
+}
+
+// 22.5min scalp signal — sourced from cycles22M (1m candle resolution). Same
+// scalp entry-window logic as 5.625M (entry +1h offset). Card displays the
+// active 22.5M scalp's progress when present, else previews next sweep + window.
+function build22MinSignal(md) {
+  const cycles22M = md?.cycles22M ?? [];
+  const scalp = md?.activeScalps?.["22.5min"] ?? null;
+  const dir = scalp?.direction
+    ?? (md?.activeSetup?.status === "ACTIVE" ? md.activeSetup.direction : null)
+    ?? getDir(md?.allowedDirection, md?.lockState);
+  if (!cycles22M.length) return null;
+
+  const completed = [...cycles22M]
+    .filter(c => c.high != null && c.low != null && c.complete)
+    .sort((a, b) => (b.index ?? 0) - (a.index ?? 0));
+  const ref = completed[0]
+    ?? [...cycles22M].filter(c => c.high != null).sort((a, b) => (b.index ?? 0) - (a.index ?? 0))[0];
+  if (!ref) return null;
+
+  const isBuy = dir === "BUY";
+  const sweepTime = isBuy ? ref.hitLow?.time : ref.hitHigh?.time;
+  const scalpEntryLabel = (scalp && (scalp.status === "PENDING_ENTRY" || scalp.status === "ACTIVE"))
+    ? scalp.scalpEntryWindow
+    : (scalpEntryWindowForSweepTime(sweepTime) ?? nextScalpEntryWindowFromNow());
+
+  return buildSignal(dir, md?.lockState?.strength, ref.high, ref.low, ref.hitHigh, ref.hitLow,
+    `${ref.startTime}–${ref.endTime ?? "now"}`, null, scalpEntryLabel);
+}
+
+// 5.625min scalp signal — only relevant when an ACTIVE primary setup exists in
+// the same direction. The card surfaces the most recent 5.625M cycle's sweep
+// status (BSL or SSL hit). Entry time always uses the +1h scalp window.
+function build5MinSignal(md) {
+  const cycles5M = md?.cycles5M ?? [];
+  const scalp = md?.activeScalps?.["5.625min"] ?? null;
+  // Direction priority: active scalp's direction → active primary → bias
+  const dir = scalp?.direction
+    ?? (md?.activeSetup?.status === "ACTIVE" ? md.activeSetup.direction : null)
+    ?? getDir(md?.allowedDirection, md?.lockState);
+  if (!cycles5M.length) return null;
+
+  const completed = [...cycles5M]
+    .filter(c => c.high != null && c.low != null && c.complete)
+    .sort((a, b) => (b.index ?? 0) - (a.index ?? 0));
+  const ref = completed[0]
+    ?? [...cycles5M].filter(c => c.high != null).sort((a, b) => (b.index ?? 0) - (a.index ?? 0))[0];
+  if (!ref) return null;
+
+  // Scalp entry window resolution priority:
+  //   1) active scalp's stored scalpEntryWindow (PENDING_ENTRY or ACTIVE)
+  //   2) computed from sweep time (which is "now-ish" if a fresh sweep just happened)
+  //   3) next scalp window from current ET time (fallback while watching)
+  const isBuy = dir === "BUY";
+  const sweepTime = isBuy ? ref.hitLow?.time : ref.hitHigh?.time;
+  const scalpEntryLabel = (scalp && (scalp.status === "PENDING_ENTRY" || scalp.status === "ACTIVE"))
+    ? scalp.scalpEntryWindow
+    : (scalpEntryWindowForSweepTime(sweepTime) ?? nextScalpEntryWindowFromNow());
+
+  return buildSignal(dir, md?.lockState?.strength, ref.high, ref.low, ref.hitHigh, ref.hitLow,
+    `${ref.startTime}–${ref.endTime ?? "now"}`, null, scalpEntryLabel);
 }
 
 function build6HSignal(md) {
@@ -685,7 +771,9 @@ function buildDailySignal(md) {
 // closed trades (WIN/LOSS) live in the /journal page — no duplicate history here.
 function pickPinnedSetups(setupHistory, activeSetup) {
   const hist = setupHistory ?? [];
-  const result = hist.filter(s => s.status === "ACTIVE");
+  // Scalps live on the 5.625min card with their own progress display — exclude
+  // them from the pinned row so the user doesn't see the same trade twice.
+  const result = hist.filter(s => s.status === "ACTIVE" && s.type !== "scalp");
   // Fallback: surface live activeSetup if the log entry is legacy (no status).
   if (activeSetup && activeSetup.status === "ACTIVE") {
     const already = result.some(s =>
@@ -872,18 +960,29 @@ function MarketBlock({ market, liveData }) {
     ?? [...(md?.cycles6H ?? [])].reverse().find(c => c?.status === "complete" && c.high != null && c.low != null);
   const sixHEq = _activeSixH ? (_activeSixH.high + _activeSixH.low) / 2 : null;
 
-  const dailySig  = attachDailyEntry(md, buildDailySignal(md));
-  const sixHSig   = build6HSignal(md);
-  const ninetyMin = build90MinSignal(md);
+  const dailySig    = attachDailyEntry(md, buildDailySignal(md));
+  const sixHSig     = build6HSignal(md);
+  const ninetyMin   = build90MinSignal(md);
+  const twentyTwoMin = build22MinSignal(md);
+  const fiveMin     = build5MinSignal(md);
+  // Scalps live in their own slots, not in activeSetup. Each cycle-tf has its
+  // own slot — both can be PENDING/ACTIVE simultaneously per market.
+  const scalp22M    = md?.activeScalps?.["22.5min"] ?? null;
+  const scalp5M     = md?.activeScalps?.["5.625min"] ?? null;
+  const scalp22MAlive = scalp22M && (scalp22M.status === "PENDING_ENTRY" || scalp22M.status === "ACTIVE");
+  const scalp5MAlive  = scalp5M  && (scalp5M.status  === "PENDING_ENTRY" || scalp5M.status  === "ACTIVE");
 
-  // Filter signals by allowedDirection
-  const daily  = dailySig  && (!allowed || dailySig.type  === allowed) ? dailySig  : null;
-  const sixH   = sixHSig   && (!allowed || sixHSig.type   === allowed) ? sixHSig   : null;
-  const ninety = ninetyMin && (!allowed || ninetyMin.type === allowed) ? ninetyMin : null;
+  // Filter primary signals by allowedDirection. Scalp cards (22.5M + 5.625M)
+  // use their own scalp's direction.
+  const daily   = dailySig     && (!allowed || dailySig.type     === allowed) ? dailySig     : null;
+  const sixH    = sixHSig      && (!allowed || sixHSig.type      === allowed) ? sixHSig      : null;
+  const ninety  = ninetyMin    && (!allowed || ninetyMin.type    === allowed) ? ninetyMin    : null;
+  const twoHalf = twentyTwoMin; // scalp card — always show when cycles present
+  const fiveM   = fiveMin;      // scalp card — always show when cycles present
 
   const pinned = pickPinnedSetups(md?.setupHistory, md?.activeSetup);
 
-  if (!daily && !sixH && !ninety && !pinned.length) return null;
+  if (!daily && !sixH && !ninety && !twoHalf && !fiveM && !pinned.length) return null;
 
   const rawSetup = md?.activeSetup ?? null;
 
@@ -899,10 +998,13 @@ function MarketBlock({ market, liveData }) {
   const isClosedStatus = rawSetup && (rawSetup.status === "CLOSED_SL" || rawSetup.status === "CLOSED_TP2");
   const attachable = rawSetup && !isClosedStatus && !isPinned(rawSetup);
 
-  // Only attach setup to the card whose timeframe matches.
-  const dailySetup  = attachable && rawSetup.tf === "daily" && daily  && rawSetup.direction === daily.type  ? rawSetup : null;
-  const sixHSetup   = attachable && rawSetup.tf === "6H"    && sixH   && rawSetup.direction === sixH.type   ? rawSetup : null;
-  const ninetySetup = attachable && rawSetup.tf === "90min" && ninety && rawSetup.direction === ninety.type ? rawSetup : null;
+  // Only attach primary setup to the card whose timeframe matches. 22.5min and
+  // 5.625min cards attach their respective scalp (from activeScalps map).
+  const dailySetup    = attachable && rawSetup.tf === "daily"   && daily   && rawSetup.direction === daily.type   ? rawSetup : null;
+  const sixHSetup     = attachable && rawSetup.tf === "6H"      && sixH    && rawSetup.direction === sixH.type    ? rawSetup : null;
+  const ninetySetup   = attachable && rawSetup.tf === "90min"   && ninety  && rawSetup.direction === ninety.type  ? rawSetup : null;
+  const twoHalfSetup  = scalp22MAlive ? scalp22M : null;
+  const fiveMSetup    = scalp5MAlive  ? scalp5M  : null;
   const activeSetup = dailySetup ?? sixHSetup ?? ninetySetup;
 
   // For each TF card: is there a pinned ACTIVE setup that already shows the
@@ -910,9 +1012,10 @@ function MarketBlock({ market, liveData }) {
   // suppressed to avoid showing two different entry prices for the same trade.
   const hasPinnedActiveFor = (tf, dir) => pinned.some(s =>
     s.status === "ACTIVE" && (s.tf === tf || s.source === tf) && s.direction === dir);
-  const dailyHasPinned  = daily  ? hasPinnedActiveFor("daily", daily.type)  : false;
-  const sixHHasPinned   = sixH   ? hasPinnedActiveFor("6H",    sixH.type)   : false;
-  const ninetyHasPinned = ninety ? hasPinnedActiveFor("90min", ninety.type) : false;
+  const dailyHasPinned   = daily   ? hasPinnedActiveFor("daily",   daily.type)   : false;
+  const sixHHasPinned    = sixH    ? hasPinnedActiveFor("6H",      sixH.type)    : false;
+  const ninetyHasPinned  = ninety  ? hasPinnedActiveFor("90min",   ninety.type)  : false;
+  const twoHalfHasPinned = twoHalf ? hasPinnedActiveFor("22.5min", twoHalf.type) : false;
 
   // For each TF card: is there a recently CLOSED setup for THIS cycle? Returns
   // "WIN" | "LOSS" | null. A trade that already played out (SL or TP) shouldn't
@@ -931,9 +1034,10 @@ function MarketBlock({ market, liveData }) {
     );
     return hit ? (hit.status === "CLOSED_TP2" ? "WIN" : "LOSS") : null;
   };
-  const dailyRecentClose  = daily  ? hasRecentCloseFor("daily", daily.type,  daily.entryTimeLabel)  : null;
-  const sixHRecentClose   = sixH   ? hasRecentCloseFor("6H",    sixH.type,   sixH.entryTimeLabel)   : null;
-  const ninetyRecentClose = ninety ? hasRecentCloseFor("90min", ninety.type, ninety.entryTimeLabel) : null;
+  const dailyRecentClose   = daily   ? hasRecentCloseFor("daily",   daily.type,   daily.entryTimeLabel)   : null;
+  const sixHRecentClose    = sixH    ? hasRecentCloseFor("6H",      sixH.type,    sixH.entryTimeLabel)    : null;
+  const ninetyRecentClose  = ninety  ? hasRecentCloseFor("90min",   ninety.type,  ninety.entryTimeLabel)  : null;
+  const twoHalfRecentClose = twoHalf ? hasRecentCloseFor("22.5min", twoHalf.type, twoHalf.entryTimeLabel) : null;
 
   const hasActive = (activeSetup && ["ACTIVE","CLOSED_SL","CLOSED_TP2"].includes(activeSetup.status))
                     || pinned.some(s => s.status === "ACTIVE");
@@ -979,14 +1083,17 @@ function MarketBlock({ market, liveData }) {
         {/* Live TF cards are read-only previews — chart-replay lives on the
             journal page only. Wrapped in ViewTracker so admin can see who
             actually scrolls to which signal. */}
-        <ViewTracker market={market} tf="daily"  setupId={dailySetup?.id}>
-          <SignalCard label="Daily" sig={daily}  market={market} activeSetup={dailySetup}   currentPrice={currentPrice} dailyEq={dailyEq} sixHEq={sixHEq} hasPinnedActive={dailyHasPinned}  hasRecentClose={dailyRecentClose} />
-        </ViewTracker>
         <ViewTracker market={market} tf="6H"     setupId={sixHSetup?.id}>
           <SignalCard label="6H"    sig={sixH}   market={market} activeSetup={sixHSetup}    currentPrice={currentPrice} dailyEq={dailyEq} sixHEq={sixHEq} hasPinnedActive={sixHHasPinned}   hasRecentClose={sixHRecentClose} />
         </ViewTracker>
         <ViewTracker market={market} tf="90min"  setupId={ninetySetup?.id}>
           <SignalCard label="90min" sig={ninety} market={market} activeSetup={ninetySetup}  currentPrice={currentPrice} dailyEq={dailyEq} sixHEq={sixHEq} hasPinnedActive={ninetyHasPinned} hasRecentClose={ninetyRecentClose} />
+        </ViewTracker>
+        <ViewTracker market={market} tf="22.5min" setupId={twoHalfSetup?.id}>
+          <SignalCard label="22.5min ⚡SCALP" sig={twoHalf} market={market} activeSetup={twoHalfSetup} currentPrice={currentPrice} dailyEq={dailyEq} sixHEq={sixHEq} hasPinnedActive={false} hasRecentClose={null} />
+        </ViewTracker>
+        <ViewTracker market={market} tf="5.625min" setupId={fiveMSetup?.id}>
+          <SignalCard label="5.625min ⚡SCALP" sig={fiveM} market={market} activeSetup={fiveMSetup} currentPrice={currentPrice} dailyEq={dailyEq} sixHEq={sixHEq} hasPinnedActive={false} hasRecentClose={null} />
         </ViewTracker>
       </div>
     </div>

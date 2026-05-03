@@ -1423,23 +1423,27 @@ function checkEntryZoneFilter(setup, dailyEq, sixHEq) {
   if (setup.sweepPrice == null) {
     return { passes: true, reason: "no-sweep-price" };
   }
+  // Per user request: only ONE of daily/6H needs to be in the right zone for
+  // the entry to fire (loose OR — was strict AND in the previous revision).
+  // The journal's pdAligned snapshot tracks the same loose criterion so stats
+  // reflect what the filter actually let through.
   const sp = setup.sweepPrice;
   if (setup.direction === "BUY") {
     const inDailyDiscount = sp < dailyEq;
     const inSixHDiscount  = sp < sixHEq;
-    if (inDailyDiscount && inSixHDiscount) return { passes: true, reason: "BUY discount-aligned" };
+    if (inDailyDiscount || inSixHDiscount) return { passes: true, reason: "BUY discount-aligned (≥1 of 2)" };
     return {
       passes: false,
-      reason: `BUY sweep ${sp.toFixed(2)} not in discount — daily eq ${dailyEq.toFixed(2)} (${inDailyDiscount ? "✓" : "✗"}), 6H eq ${sixHEq.toFixed(2)} (${inSixHDiscount ? "✓" : "✗"})`,
+      reason: `BUY sweep ${sp.toFixed(2)} not in discount of EITHER zone — daily eq ${dailyEq.toFixed(2)} (✗), 6H eq ${sixHEq.toFixed(2)} (✗)`,
     };
   }
   if (setup.direction === "SELL") {
     const inDailyPremium = sp > dailyEq;
     const inSixHPremium  = sp > sixHEq;
-    if (inDailyPremium && inSixHPremium) return { passes: true, reason: "SELL premium-aligned" };
+    if (inDailyPremium || inSixHPremium) return { passes: true, reason: "SELL premium-aligned (≥1 of 2)" };
     return {
       passes: false,
-      reason: `SELL sweep ${sp.toFixed(2)} not in premium — daily eq ${dailyEq.toFixed(2)} (${inDailyPremium ? "✓" : "✗"}), 6H eq ${sixHEq.toFixed(2)} (${inSixHPremium ? "✓" : "✗"})`,
+      reason: `SELL sweep ${sp.toFixed(2)} not in premium of EITHER zone — daily eq ${dailyEq.toFixed(2)} (✗), 6H eq ${sixHEq.toFixed(2)} (✗)`,
     };
   }
   return { passes: true, reason: "unknown-direction" };
@@ -1479,11 +1483,13 @@ async function fireEntryTrigger(marketKey, setup, opts = {}) {
     pdSixHEq:       sixHEq,
     pdZoneDaily:    dailyEq != null ? (sp < dailyEq ? "DISCOUNT" : "PREMIUM") : null,
     pdZoneSixH:     sixHEq  != null ? (sp < sixHEq  ? "DISCOUNT" : "PREMIUM") : null,
+    // Mirrors checkEntryZoneFilter — a setup counts as PD-aligned when the
+    // sweep landed in the right zone of EITHER daily OR 6H (loose OR).
     pdAligned:
       setup.direction === "BUY"
-        ? (dailyEq != null && sixHEq != null && sp < dailyEq && sp < sixHEq)
+        ? ((dailyEq != null && sp < dailyEq) || (sixHEq != null && sp < sixHEq))
         : setup.direction === "SELL"
-          ? (dailyEq != null && sixHEq != null && sp > dailyEq && sp > sixHEq)
+          ? ((dailyEq != null && sp > dailyEq) || (sixHEq != null && sp > sixHEq))
           : false,
   } : {};
 

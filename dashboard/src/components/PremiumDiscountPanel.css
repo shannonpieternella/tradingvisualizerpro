@@ -131,6 +131,42 @@
 .pdp-empty .pdp-no-data,
 .pdp-card-empty .pdp-no-data { color: #5a7896; font-size: 11px; }
 
+/* Live trade summary row — sits above the zone bars when a setup is live or
+   recently closed for the market. Compact one-liner with status, direction,
+   SL/TP and a PD-pass/fail badge that mirrors the server-side filter. */
+.pdp-trade {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 6px 8px;
+  margin: 6px 0 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  border: 1px solid transparent;
+  background: rgba(15,22,38,.5);
+}
+.pdp-trade-live    { border-color: rgba(0,200,255,.35); background: rgba(0,40,60,.30); }
+.pdp-trade-waiting { border-color: rgba(140,160,200,.30); }
+.pdp-trade-win     { border-color: rgba(0,200,120,.40); background: rgba(0,40,20,.30); }
+.pdp-trade-loss    { border-color: rgba(240,80,90,.40); background: rgba(40,10,15,.30); }
+
+.pdp-trade-status { font-size: 10px; font-weight: 700; letter-spacing: .04em; color: #d4e6ff; }
+.pdp-trade-dir.buy  { color: #4cdc9b; font-weight: 700; }
+.pdp-trade-dir.sell { color: #ff6b7a; font-weight: 700; }
+.pdp-trade-tf    { font-size: 10px; color: #8aaabf; padding: 1px 5px; background: rgba(120,140,160,.18); border-radius: 3px; }
+.pdp-trade-entry { font-family: 'JetBrains Mono', monospace; color: #d4e6ff; font-weight: 600; }
+.pdp-trade-level { font-family: 'JetBrains Mono', monospace; color: #8aaabf; font-size: 10px; }
+.pdp-trade-sl    { color: #ff6b7a; }
+.pdp-trade-tp    { color: #4cdc9b; }
+.pdp-trade-pd {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  letter-spacing: .04em;
+}
+.pdp-trade-pd.passed { background: rgba(240,192,80,.22); color: #f0c050; }
+.pdp-trade-pd.failed { background: rgba(255,140,80,.20); color: #ff8c50; }
+
 @media (max-width: 640px) {
   .pdp-zone {
     grid-template-columns: 1fr;

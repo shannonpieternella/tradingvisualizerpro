@@ -177,6 +177,12 @@ export default function PremiumDiscountPanel({ activeMarket = null }) {
                 {fullStack && <span className="pdp-stack-tag">⭐ STACKED GOLDEN — Weekly + Daily + 6H aligned</span>}
               </div>
 
+              {/* Live active trade summary — when monitor has an ACTIVE setup
+                  we surface it here so the trader sees the trade alongside the
+                  zone bars. Filter is OR-loose (1 of 2): either daily OR 6H
+                  in the right zone is enough to pass. */}
+              <LiveTradeRow setup={d.activeSetup} pdDay={pdDay} pd6H={pd6H} />
+
               <ZoneRow label={weekLabel}              pd={pdWeek} alignDirection={alignDirection} />
               <ZoneRow label="DAILY (18:00 ET → now)" pd={pdDay}  alignDirection={alignDirection} />
               <ZoneRow label="6H (ref cycle)"         pd={pd6H}   alignDirection={alignDirection} />
@@ -184,6 +190,57 @@ export default function PremiumDiscountPanel({ activeMarket = null }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// Live active-trade summary row. Shows entry/SL/TP when status === ACTIVE,
+// plus a sweep-zone tag indicating which zone(s) the entry-trigger sweep
+// passed through. Hidden when there is no active or pending trade.
+function LiveTradeRow({ setup, pdDay, pd6H }) {
+  if (!setup) return null;
+  const status = setup.status;
+  const isLive    = status === "ACTIVE";
+  const isWaiting = status === "WAITING_PHASE2";
+  const isClosed  = status === "CLOSED_TP2" || status === "CLOSED_SL";
+  if (!isLive && !isWaiting && !isClosed) return null;
+
+  const dir = setup.direction;
+  const sweepZoneDay = setup.pdZoneDaily
+    ?? (setup.sweepPrice != null && pdDay ? (setup.sweepPrice < pdDay.eq ? "DISCOUNT" : "PREMIUM") : null);
+  const sweepZoneSixH = setup.pdZoneSixH
+    ?? (setup.sweepPrice != null && pd6H ? (setup.sweepPrice < pd6H.eq ? "DISCOUNT" : "PREMIUM") : null);
+  const want = dir === "BUY" ? "DISCOUNT" : "PREMIUM";
+  const dailyOK = sweepZoneDay  === want;
+  const sixHOK  = sweepZoneSixH === want;
+  const filterPassed = dailyOK || sixHOK;  // OR — matches server filter
+
+  const cls = isClosed
+    ? (status === "CLOSED_TP2" ? "pdp-trade-win" : "pdp-trade-loss")
+    : isLive ? "pdp-trade-live" : "pdp-trade-waiting";
+  const statusLabel = isLive ? "● LIVE"
+                    : isWaiting ? "WAITING"
+                    : status === "CLOSED_TP2" ? "WIN ✅"
+                    : "LOSS ❌";
+
+  return (
+    <div className={`pdp-trade ${cls}`}>
+      <span className="pdp-trade-status">{statusLabel}</span>
+      <span className={`pdp-trade-dir ${dir === "BUY" ? "buy" : "sell"}`}>
+        {dir === "BUY" ? "▲ BUY" : "▼ SELL"}
+      </span>
+      <span className="pdp-trade-tf">{setup.source ?? setup.tf ?? "—"}</span>
+      {setup.entry != null && <span className="pdp-trade-entry">@ {fp(setup.entry)}</span>}
+      {setup.sl != null && <span className="pdp-trade-level pdp-trade-sl">SL {fp(setup.sl)}</span>}
+      {setup.tp1 != null && <span className="pdp-trade-level pdp-trade-tp">TP {fp(setup.tp1)}</span>}
+      {setup.sweepPrice != null && (sweepZoneDay || sweepZoneSixH) && (
+        <span
+          className={`pdp-trade-pd ${filterPassed ? "passed" : "failed"}`}
+          title={`Sweep ${fp(setup.sweepPrice)} | Daily: ${sweepZoneDay ?? "?"} ${dailyOK ? "✓" : "✗"} | 6H: ${sweepZoneSixH ?? "?"} ${sixHOK ? "✓" : "✗"}`}
+        >
+          {filterPassed ? "⭐ PD ✓" : "⚠ PD ✗"} ({dailyOK ? "D" : ""}{dailyOK && sixHOK ? "+" : ""}{sixHOK ? "6H" : ""}{!filterPassed ? "—" : ""})
+        </span>
+      )}
     </div>
   );
 }
