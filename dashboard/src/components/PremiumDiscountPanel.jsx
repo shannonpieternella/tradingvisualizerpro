@@ -49,6 +49,32 @@ function refDailyToday(dailyLevels) {
   return (dailyLevels ?? []).find(d => d?.isToday) ?? null;
 }
 
+// Weekly reference = aggregate high/low over the current trading week.
+// Walks back from today's entry until it hits a Sunday (ICT trading week
+// starts at the Sunday 18:00 ET session open). Falls back to rolling 7d if
+// no Sunday boundary is present in the data window.
+function refWeeklyRange(dailyLevels) {
+  if (!dailyLevels?.length) return null;
+  const todayIdx = dailyLevels.findIndex(d => d?.isToday);
+  if (todayIdx < 0) return null;
+
+  let startIdx = Math.max(0, todayIdx - 6);  // rolling 7d default
+  for (let i = todayIdx; i >= Math.max(0, todayIdx - 7); i--) {
+    if (dailyLevels[i]?.date?.startsWith("Sun")) { startIdx = i; break; }
+  }
+
+  const slice = dailyLevels.slice(startIdx, todayIdx + 1);
+  const highs = slice.filter(d => d.high != null).map(d => d.high);
+  const lows  = slice.filter(d => d.low  != null).map(d => d.low);
+  if (!highs.length || !lows.length) return null;
+  return {
+    high:    Math.max(...highs),
+    low:     Math.min(...lows),
+    days:    slice.length,
+    fromDay: slice[0]?.date,
+  };
+}
+
 function isAligned(direction, zone) {
   if (!direction || !zone) return false;
   return (direction === "BUY"  && zone === "DISCOUNT")
@@ -113,9 +139,11 @@ export default function PremiumDiscountPanel({ activeMarket = null }) {
           const price = d.currentPrice;
           const ref6H   = ref6HCycle(d.cycles6H);
           const refDay  = refDailyToday(d.dailyLevels);
+          const refWeek = refWeeklyRange(d.dailyLevels);
 
-          const pd6H  = ref6H  ? computePD(ref6H.high,  ref6H.low,  price) : null;
-          const pdDay = refDay ? computePD(refDay.high, refDay.low, price) : null;
+          const pd6H   = ref6H   ? computePD(ref6H.high,   ref6H.low,   price) : null;
+          const pdDay  = refDay  ? computePD(refDay.high,  refDay.low,  price) : null;
+          const pdWeek = refWeek ? computePD(refWeek.high, refWeek.low, price) : null;
 
           // Direction used for golden-alignment: prefer the active setup's
           // direction when present; fall back to the dashboard's allowedDirection
@@ -125,12 +153,16 @@ export default function PremiumDiscountPanel({ activeMarket = null }) {
             ?? d.allowedDirection
             ?? null;
 
-          // If BOTH zones agree with the direction the trader is pursuing it
-          // is the strongest signal — call that out separately from per-row golden.
-          const fullStack = alignDirection
-            && pd6H && pdDay
-            && isAligned(alignDirection, pd6H.zone)
-            && isAligned(alignDirection, pdDay.zone);
+          // Stacked golden = ALL three available zones agree with the
+          // direction the trader is pursuing — strongest confluence.
+          const presentZones = [pdWeek, pdDay, pd6H].filter(Boolean);
+          const fullStack = !!(alignDirection
+            && presentZones.length >= 2
+            && presentZones.every(pd => isAligned(alignDirection, pd.zone)));
+
+          const weekLabel = refWeek
+            ? `WEEKLY (${refWeek.days}d range, vanaf ${refWeek.fromDay ?? "—"})`
+            : "WEEKLY (7d range)";
 
           return (
             <div key={mk} className={`pdp-card ${fullStack ? "pdp-stacked-golden" : ""}`}>
@@ -142,11 +174,12 @@ export default function PremiumDiscountPanel({ activeMarket = null }) {
                     {alignDirection === "BUY" ? "▲ BUY bias" : "▼ SELL bias"}
                   </span>
                 )}
-                {fullStack && <span className="pdp-stack-tag">⭐ STACKED GOLDEN — Daily + 6H aligned</span>}
+                {fullStack && <span className="pdp-stack-tag">⭐ STACKED GOLDEN — Weekly + Daily + 6H aligned</span>}
               </div>
 
-              <ZoneRow label="DAILY (18:00 ET → now)" pd={pdDay} alignDirection={alignDirection} />
-              <ZoneRow label="6H (ref cycle)"          pd={pd6H}  alignDirection={alignDirection} />
+              <ZoneRow label={weekLabel}              pd={pdWeek} alignDirection={alignDirection} />
+              <ZoneRow label="DAILY (18:00 ET → now)" pd={pdDay}  alignDirection={alignDirection} />
+              <ZoneRow label="6H (ref cycle)"         pd={pd6H}   alignDirection={alignDirection} />
             </div>
           );
         })}
