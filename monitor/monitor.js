@@ -2631,12 +2631,16 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   // tegen de huidige market price gefired wordt.
   if (activeSetup && activeSetup.status === "WAITING_PHASE2" && !activeSetup.entryTriggered && activeSetup.entryWindowTs && activeSetup.step2Ts) {
     const entryCandle = candles.find(c => c.timestamp === activeSetup.entryWindowTs);
-    // Cap how stale the recovery can be — don't suddenly fire a 3-day-old setup
-    // at current market. 24h is generous (covers cron outages overnight) but
-    // keeps the entry economically meaningful.
-    const ageH = entryCandle ? (Date.now() / 1000 - entryCandle.timestamp) / 3600 : 0;
-    if (entryCandle && ageH < 24) {
-      console.warn(`[${marketKey}] LATE-FIRE RECOVERY: ${activeSetup.id} WAITING_PHASE2 with entryWindowTs ${ageH.toFixed(1)}h ago — firing now`);
+    // Cap how stale the late-fire can be. Original 24h was too lenient — we
+    // saw US30 fired 1.3h late on a setup where the market had already moved
+    // against the entry, instant SL. Tighter cap keeps the late-fire useful
+    // (catches the MCP candle race + missed cron tick) without firing on
+    // stale data where the original setup thesis is gone.
+    //   30 min covers: race within same Phase 2 window + 1-2 missed cron ticks
+    //   Beyond that → operator handles via /admin manual-trade form
+    const ageMin = entryCandle ? (Date.now() / 1000 - entryCandle.timestamp) / 60 : 0;
+    if (entryCandle && ageMin < 30) {
+      console.warn(`[${marketKey}] LATE-FIRE RECOVERY: ${activeSetup.id} WAITING_PHASE2 with entryWindowTs ${ageMin.toFixed(0)}min ago — firing now`);
       const dec = entryCandle.open > 100 ? 1 : 5;
       const actualEntry = +entryCandle.open.toFixed(dec);
       const slPrice = computeSweepSL({
@@ -2661,7 +2665,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
       activeSetup.entryTs = entryCandle.timestamp * 1000;
       activeSetup.entryTime = tsToETLabel(entryCandle.timestamp);
       try {
-        await fireEntryTrigger(marketKey, activeSetup, { sourceTag: `late-fire | ${ageH.toFixed(1)}h late` });
+        await fireEntryTrigger(marketKey, activeSetup, { sourceTag: `late-fire | ${ageMin.toFixed(0)}min late` });
       } catch (e) {
         console.warn(`[${marketKey}] LATE-FIRE RECOVERY failed: ${e.message}`);
       }
