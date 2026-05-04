@@ -91,6 +91,78 @@ export default function AdminPage() {
   // account — only fetch when actually viewing).
   useEffect(() => { if (tab === "brokers" && !brokers) refreshBrokers(); }, [tab, brokers, refreshBrokers]);
 
+  // Trade tab state
+  const [positions, setPositions] = useState([]);
+  const [tradeForm, setTradeForm] = useState({ market: "ETHUSD", direction: "SELL", sl: "", tp1: "", tp2: "", volume: "" });
+  const [tradeMsg,  setTradeMsg]  = useState(null);
+  const [posLoading, setPosLoading] = useState(false);
+  const refreshPositions = useCallback(async () => {
+    setPosLoading(true);
+    try {
+      const r = await authFetch("/api/admin/positions").then(r => r.json());
+      if (r.ok) setPositions(r.positions);
+    } finally { setPosLoading(false); }
+  }, [authFetch]);
+  useEffect(() => { if (tab === "trade") refreshPositions(); }, [tab, refreshPositions]);
+
+  async function submitTrade(e) {
+    e.preventDefault();
+    setTradeMsg(null);
+    const body = {
+      market:    tradeForm.market,
+      direction: tradeForm.direction,
+      sl:  Number(tradeForm.sl),
+      tp1: Number(tradeForm.tp1),
+      ...(tradeForm.tp2    !== "" ? { tp2:    Number(tradeForm.tp2)    } : {}),
+      ...(tradeForm.volume !== "" ? { volume: Number(tradeForm.volume) } : {}),
+    };
+    try {
+      const r = await authFetch("/api/admin/manual-trade", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || "trade failed");
+      const okLegs = r.legs.filter(l => l.ok).length;
+      setTradeMsg({ ok: true, text: `✓ ${tradeForm.market} ${tradeForm.direction} verstuurd — ${okLegs}/${r.legs.length} legs OK (setupId ${r.setupId})` });
+      setTimeout(refreshPositions, 8000);
+    } catch (err) {
+      setTradeMsg({ ok: false, text: `⚠ ${err.message}` });
+    }
+  }
+
+  async function closePosition(p) {
+    if (!confirm(`Sluit ${p.symbol} ${p.type === "POSITION_TYPE_BUY" ? "BUY" : "SELL"} ${p.volume} op ${p.userName ?? p.login}?`)) return;
+    try {
+      const r = await authFetch("/api/admin/close-position", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: p.accountId, positionId: p.positionId }),
+      }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || "close failed");
+      setTradeMsg({ ok: true, text: `✓ Position ${p.positionId} closed` });
+      refreshPositions();
+    } catch (err) {
+      setTradeMsg({ ok: false, text: `⚠ ${err.message}` });
+    }
+  }
+
+  async function closeAllSymbol(symbol) {
+    if (!confirm(`Sluit ALLE ${symbol} posities op alle subscribers?`)) return;
+    try {
+      const r = await authFetch("/api/admin/close-position", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol }),
+      }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || "close failed");
+      setTradeMsg({ ok: true, text: `✓ ${symbol}: ${r.closed.length} closed${r.failed?.length ? `, ${r.failed.length} failed` : ""}` });
+      refreshPositions();
+    } catch (err) {
+      setTradeMsg({ ok: false, text: `⚠ ${err.message}` });
+    }
+  }
+
   if (!user?.isAdmin) {
     return <div className="ap-wrap"><div className="ap-error">⚠ Alleen admins.</div></div>;
   }
@@ -125,6 +197,9 @@ export default function AdminPage() {
         </button>
         <button className={tab === "brokers" ? "ap-tab-active" : ""} onClick={() => setTab("brokers")}>
           💼 Brokers{brokers ? ` (${brokers.totals.accounts})` : ""}
+        </button>
+        <button className={tab === "trade" ? "ap-tab-active" : ""} onClick={() => setTab("trade")}>
+          ⚡ Trade
         </button>
         <button className={tab === "vnc" ? "ap-tab-active" : ""} onClick={() => setTab("vnc")}>
           🖥️ Browser (VNC)
@@ -363,6 +438,122 @@ export default function AdminPage() {
               </table>
             </div>
           )}
+        </section>
+      )}
+
+      {tab === "trade" && (
+        <section>
+          <div className="ap-card">
+            <h3>Manual trade — direct CopyFactory signal</h3>
+            <p className="ap-vnc-hint">
+              Verstuurt een signal via dezelfde bridge die de auto-engine ook gebruikt. CopyFactory repliceert naar alle subscribers met hun eigen risk-scaling. Met TP1 alleen wordt 1 leg verstuurd; met TP1 + TP2 wordt 't gesplitst (1R + 2R).
+              <br /><b>Lock bias-mode</b> filtert alleen welke richting de auto-engine accepteert; voor een directe handmatige trade gebruik dit formulier.
+            </p>
+            <form className="ap-trade-form" onSubmit={submitTrade}>
+              <div className="ap-trade-row">
+                <label>Markt
+                  <select value={tradeForm.market} onChange={e => setTradeForm(f => ({ ...f, market: e.target.value }))}>
+                    {["NAS100","US500","US30","XAUUSD","GBPUSD","BTCUSD","ETHUSD"].map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </label>
+                <label>Richting
+                  <div className="ap-dir-toggle">
+                    <button type="button"
+                      className={`ap-dir-btn ${tradeForm.direction === "BUY" ? "ap-dir-buy" : ""}`}
+                      onClick={() => setTradeForm(f => ({ ...f, direction: "BUY" }))}>▲ BUY</button>
+                    <button type="button"
+                      className={`ap-dir-btn ${tradeForm.direction === "SELL" ? "ap-dir-sell" : ""}`}
+                      onClick={() => setTradeForm(f => ({ ...f, direction: "SELL" }))}>▼ SELL</button>
+                  </div>
+                </label>
+                <label>Volume <span className="ap-label-hint">(lots, optioneel)</span>
+                  <input type="number" step="0.01" placeholder="0.01" value={tradeForm.volume}
+                    onChange={e => setTradeForm(f => ({ ...f, volume: e.target.value }))} />
+                </label>
+              </div>
+              <div className="ap-trade-divider">Levels</div>
+              <div className="ap-trade-row">
+                <label>Stop Loss
+                  <input type="number" step="0.0001" required placeholder="—" value={tradeForm.sl}
+                    onChange={e => setTradeForm(f => ({ ...f, sl: e.target.value }))} />
+                </label>
+                <label>TP1 <span className="ap-label-hint">(1R)</span>
+                  <input type="number" step="0.0001" required placeholder="—" value={tradeForm.tp1}
+                    onChange={e => setTradeForm(f => ({ ...f, tp1: e.target.value }))} />
+                </label>
+                <label>TP2 <span className="ap-label-hint">(2R, optioneel)</span>
+                  <input type="number" step="0.0001" placeholder="—" value={tradeForm.tp2}
+                    onChange={e => setTradeForm(f => ({ ...f, tp2: e.target.value }))} />
+                </label>
+              </div>
+              <div className="ap-trade-actions">
+                <button type="submit" className="ap-btn-primary">⚡ Verstuur signal</button>
+                {tradeMsg && <span className={tradeMsg.ok ? "ap-trade-ok" : "ap-trade-err"}>{tradeMsg.text}</span>}
+              </div>
+            </form>
+          </div>
+
+          <div className="ap-card">
+            <div className="ap-vnc-head">
+              <h3>Open posities ({positions.length})</h3>
+              <div className="ap-vnc-actions">
+                <button className="ap-btn" onClick={refreshPositions} disabled={posLoading}>
+                  {posLoading ? "…" : "↻ refresh"}
+                </button>
+              </div>
+            </div>
+            {positions.length === 0 ? (
+              <div className="ap-empty">Geen open posities op subscribers.</div>
+            ) : (
+              <table className="ap-table">
+                <thead>
+                  <tr>
+                    <th>User</th>
+                    <th>Login</th>
+                    <th>Symbol</th>
+                    <th>Type</th>
+                    <th>Vol</th>
+                    <th>Open</th>
+                    <th>Now</th>
+                    <th>SL</th>
+                    <th>TP</th>
+                    <th>P&amp;L</th>
+                    <th>Tijd</th>
+                    <th>Sluit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {positions.map(p => (
+                    <tr key={`${p.accountId}-${p.positionId}`}>
+                      <td>{p.userName ?? "—"}</td>
+                      <td>{p.login}</td>
+                      <td><b>{p.symbol}</b></td>
+                      <td>{p.type === "POSITION_TYPE_BUY" ? "BUY" : "SELL"}</td>
+                      <td>{p.volume}</td>
+                      <td>{p.openPrice}</td>
+                      <td>{p.currentPrice ?? "—"}</td>
+                      <td>{p.stopLoss ?? "—"}</td>
+                      <td>{p.takeProfit ?? "—"}</td>
+                      <td style={{ color: p.profit > 0 ? "#0a7" : p.profit < 0 ? "#c33" : undefined }}>
+                        {p.profit != null ? p.profit.toFixed(2) : "—"}
+                      </td>
+                      <td>{fmtRel(p.time)}</td>
+                      <td><button className="ap-btn-small" onClick={() => closePosition(p)}>Sluit</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {positions.length > 0 && (
+              <div className="ap-trade-row" style={{ marginTop: "12px" }}>
+                {[...new Set(positions.map(p => p.symbol))].map(sym => (
+                  <button key={sym} className="ap-btn" onClick={() => closeAllSymbol(sym)}>
+                    Sluit alle {sym} ({positions.filter(p => p.symbol === sym).length})
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </section>
       )}
 

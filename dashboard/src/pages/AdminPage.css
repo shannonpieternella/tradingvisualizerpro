@@ -118,3 +118,116 @@
 .ap-vnc-hint { color: #8a99b3; font-size: 13px; margin: 0 0 12px; }
 .ap-vnc-hint b { color: #f59e0b; }
 .ap-vnc-frame { width: 100%; height: 720px; border: 1px solid #1a2332; border-radius: 6px; background: #000; }
+
+/* ── Manual Trade form ─────────────────────────────────────────── */
+.ap-trade-form {
+  display: flex; flex-direction: column; gap: 14px;
+}
+.ap-trade-row {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+  align-items: end;
+}
+.ap-trade-form label {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  color: #6b7a90; font-weight: 600;
+}
+.ap-trade-form input,
+.ap-trade-form select {
+  background: #0a1118; color: #e2e8f0;
+  border: 1px solid #2d3e5c; border-radius: 6px;
+  padding: 10px 12px; font-size: 14px; font-weight: 500;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  outline: none; transition: border-color 0.15s ease, background 0.15s ease;
+  min-width: 0; /* allow shrinking inside grid */
+  width: 100%;
+  box-sizing: border-box;
+}
+.ap-trade-form input:focus,
+.ap-trade-form select:focus {
+  border-color: #4ade80; background: #0f1822;
+}
+.ap-trade-form input::placeholder { color: #4a5a72; }
+
+.ap-btn-primary {
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  color: #0a1118; font-weight: 700; padding: 11px 22px;
+  border-radius: 8px; border: none; cursor: pointer;
+  font-size: 14px; letter-spacing: 0.3px;
+  box-shadow: 0 2px 8px rgba(34,197,94,0.25);
+  transition: transform 0.1s ease, box-shadow 0.15s ease;
+}
+.ap-btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 14px rgba(34,197,94,0.35); }
+.ap-btn-primary:active { transform: translateY(0); }
+
+.ap-btn-small {
+  background: #2a1818; color: #ff8888; border: 1px solid #5e2a2a;
+  padding: 4px 10px; border-radius: 5px; cursor: pointer;
+  font-size: 12px; font-weight: 600;
+  transition: background 0.15s ease;
+}
+.ap-btn-small:hover { background: #3a1f1f; color: #ffaaaa; }
+
+.ap-trade-ok  { color: #4ade80; font-size: 13px; padding: 8px 12px; background: rgba(74,222,128,0.1); border-radius: 6px; border: 1px solid rgba(74,222,128,0.2); }
+.ap-trade-err { color: #ff8888; font-size: 13px; padding: 8px 12px; background: rgba(255,136,136,0.1); border-radius: 6px; border: 1px solid rgba(255,136,136,0.2); }
+
+/* Direction-aware input tints */
+.ap-trade-form select[value="BUY"]  { color: #4ade80; }
+.ap-trade-form select[value="SELL"] { color: #f87171; }
+
+/* ── Mobile responsive ─────────────────────────────────────────── */
+@media (max-width: 720px) {
+  .ap-wrap { padding: 16px 14px 32px; }
+  .ap-header { flex-direction: column; align-items: flex-start; gap: 12px; }
+  .ap-controls { width: 100%; justify-content: flex-end; }
+  .ap-tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; }
+  .ap-tabs button { white-space: nowrap; padding: 10px 14px; font-size: 13px; }
+
+  .ap-trade-row { grid-template-columns: 1fr 1fr; }
+  .ap-trade-row > button[type="submit"] { grid-column: span 2; }
+
+  .ap-card { padding: 14px 14px; }
+  .ap-stats-row { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+
+  /* Position table — horizontally scroll, smaller */
+  .ap-card > .ap-table { display: block; overflow-x: auto; white-space: nowrap; font-size: 12px; }
+  .ap-table th, .ap-table td { padding: 8px 10px; }
+}
+@media (max-width: 480px) {
+  .ap-trade-row { grid-template-columns: 1fr; }
+  .ap-trade-row > button[type="submit"] { grid-column: 1; }
+}
+
+.ap-label-hint { color: #4a5a72; font-weight: 400; text-transform: none; letter-spacing: 0; }
+
+.ap-dir-toggle {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+  background: #0a1118; border: 1px solid #2d3e5c; border-radius: 6px; padding: 4px;
+}
+.ap-dir-btn {
+  background: transparent; color: #6b7a90; border: none;
+  padding: 8px 0; border-radius: 4px; cursor: pointer;
+  font-size: 13px; font-weight: 700; letter-spacing: 0.5px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.ap-dir-btn:hover { background: rgba(255,255,255,0.04); color: #c9d3e3; }
+.ap-dir-buy  { background: rgba(74,222,128,0.18); color: #4ade80; }
+.ap-dir-sell { background: rgba(248,113,113,0.18); color: #f87171; }
+
+.ap-trade-divider {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px;
+  color: #4a5a72; font-weight: 700; padding: 6px 0;
+  border-bottom: 1px solid #1a2332;
+}
+
+.ap-trade-actions {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  padding-top: 6px;
+}
+.ap-trade-actions .ap-btn-primary { flex: 0 0 auto; }
+.ap-trade-actions > span { flex: 1 1 200px; }
+
+@media (max-width: 480px) {
+  .ap-trade-actions .ap-btn-primary { width: 100%; }
+}

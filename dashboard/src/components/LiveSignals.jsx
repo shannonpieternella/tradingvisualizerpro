@@ -87,6 +87,7 @@ function StatusBadge({ status }) {
     bsl_swept:    { label: "SWEEP ✓ — wacht entry", cls: "ls-status-partial" },
     swept:        { label: "SWEEP ✓ — wacht entry", cls: "ls-status-swept"   },
     entry_active: { label: "ENTRY ACTIEF",           cls: "ls-status-active"  },
+    runner:       { label: "RUNNER · SL@BE → TP3",  cls: "ls-status-active"  },
   };
   const s = map[status] ?? { label: status, cls: "" };
   return <span className={`ls-status-badge ${s.cls}`}>{s.label}</span>;
@@ -137,8 +138,9 @@ function SignalCard({ label, sig, market, activeSetup, currentPrice, dailyEq = n
   const setup    = activeSetup;
   // hasRecentClose ("WIN"|"LOSS"|null) lets a recently-closed setup colour the
   // card and badge even when no setup is overlaid on it (orphan cycle case).
-  const isClosed = setup?.status === "CLOSED_SL" || setup?.status === "CLOSED_TP2" || !!hasRecentClose;
-  const isLive   = setup?.status === "ACTIVE";
+  const isClosed = setup?.status === "CLOSED_SL" || setup?.status === "CLOSED_TP2" || setup?.status === "CLOSED_TP3" || setup?.status === "CLOSED_MANUAL" || !!hasRecentClose;
+  const isLive   = setup?.status === "ACTIVE" || setup?.status === "TP2_HIT_RUNNING";
+  const isRunner = setup?.status === "TP2_HIT_RUNNING";
 
   // A step is "done" only when we have an actual hit timestamp/time for it.
   // An activeSetup's existence alone is NOT proof — the monitor can create
@@ -164,16 +166,27 @@ function SignalCard({ label, sig, market, activeSetup, currentPrice, dailyEq = n
   // buildSignal passes a separate step1CycleLabel. When absent it defaults to cycleLabel.
   const effStep1CycleLabel = sig.step1CycleLabel ?? effCycleLabel;
   const isWaiting  = setup?.status === "WAITING_PHASE2";
-  const outcome    = setup?.status === "CLOSED_TP2" ? "WIN"
+  const outcome    = setup?.status === "CLOSED_TP3" ? "WIN"
+                   : setup?.status === "CLOSED_TP2" ? "WIN"
                    : setup?.status === "CLOSED_SL"  ? "LOSS"
                    : sig.outcome ?? hasRecentClose ?? null;
 
   // Helper: is current NY time past the entry window?
+  // Uses a modulo-24h heuristic: entry is "past" if it occurred within the
+  // last 12h of clock-time (i.e. today already, not later today/tomorrow).
+  // Naive same-day comparison wraps incorrectly across midnight — e.g. when
+  // current ET is 23:50 and entry is 02:45 (next morning), naive check
+  // 1430 >= 165 returns true even though entry is 3h in the future.
   const pastEntryWindow = !!(sig.entryTimeLabel && (() => {
     try {
       const [h, m] = sig.entryTimeLabel.split(":").map(Number);
       const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
-      return et.getHours() * 60 + et.getMinutes() >= h * 60 + m;
+      const nowMin   = et.getHours() * 60 + et.getMinutes();
+      const entryMin = h * 60 + m;
+      // diffMin = clock-time minutes elapsed since entryMin, wrapped to [0, 1440).
+      // <12h → entry was within the last 12h (past). ≥12h → entry hasn't happened yet.
+      const diffMin = ((nowMin - entryMin) + 1440) % 1440;
+      return diffMin < 12 * 60;
     } catch { return false; }
   })());
 
@@ -209,9 +222,11 @@ function SignalCard({ label, sig, market, activeSetup, currentPrice, dailyEq = n
           ? <OutcomeBadge outcome={outcome} />
           : entryWindowPending
             ? <span className="ls-status-badge ls-status-watch">WACHT {sig.entryTimeLabel}</span>
-            : entryWindowOpen || isLive
-              ? <StatusBadge status="entry_active" />
-              : <StatusBadge status={isWaiting ? "swept" : sig.status} />
+            : isRunner
+              ? <StatusBadge status="runner" />
+              : entryWindowOpen || isLive
+                ? <StatusBadge status="entry_active" />
+                : <StatusBadge status={isWaiting ? "swept" : sig.status} />
         }
         {sig.lockStrength > 0 && <span className="ls-lock-strength">Lock ×{sig.lockStrength}</span>}
       </div>
@@ -298,6 +313,15 @@ function SignalCard({ label, sig, market, activeSetup, currentPrice, dailyEq = n
               <span className="ls-lv-label">TP2 2R</span>
               <span className="ls-lv-val">{fp(setup.tp2)}</span>
               {setup.tp2Hit && <span className="ls-lv-extra">✓ hit</span>}
+            </div>
+          )}
+          {setup.tp3 != null && (
+            <div className="ls-level-row ls-level-tp">
+              <span className="ls-lv-label">TP3 10R</span>
+              <span className="ls-lv-val">{fp(setup.tp3)}</span>
+              {setup.tp3Hit
+                ? <span className="ls-lv-extra">🚀 hit</span>
+                : setup.slMovedToBE && <span className="ls-lv-extra">runner · SL@BE</span>}
             </div>
           )}
         </div>

@@ -48,7 +48,7 @@ const LOG_FILE = join(__dir, "../logs/copyfactory.log");
 // what the broker uses, since CopyFactory replicates the symbol verbatim
 // (per-subscriber symbolMapping can rebase later).
 const MASTER_SYMBOL_MAP = {
-  NAS100: "NAS100", US500: "US500", US30: "US30",
+  NAS100: "NAS100", US500: "SPX500", US30: "US30",
   XAUUSD: "XAUUSD", GBPUSD: "GBPUSD",
   BTCUSD: "BTCUSD", ETHUSD: "ETHUSD",
 };
@@ -76,11 +76,13 @@ async function reqCopyFactory(path, method, body) {
   } finally { clearTimeout(t); }
 }
 
-// Build one leg of the split-position pair.
+// Build one leg of the split-position triplet (tp1 / tp2 / tp3-runner).
 function buildLegPayload(setup, marketKey, leg) {
   const isBuy = setup.direction === "BUY";
   const symbol = MASTER_SYMBOL_MAP[marketKey] ?? marketKey;
-  const tp = leg === "tp2" ? setup.tp2 : setup.tp1;
+  const tp = leg === "tp3" ? setup.tp3
+           : leg === "tp2" ? setup.tp2
+           : setup.tp1;
   // CopyFactory considers a signal expired ~60s after its `time` field.
   // We must therefore stamp the SEND time, not the entry-candle time —
   // otherwise a cron tick that fires >60s after candle-open (which happens
@@ -93,7 +95,9 @@ function buildLegPayload(setup, marketKey, leg) {
     time:    new Date().toISOString(),
     ...(setup.sl != null ? { stopLoss:   setup.sl } : {}),
     ...(tp       != null ? { takeProfit: tp       } : {}),
-    magic:   0,
+    // Distinct magic per leg — same symbol+direction+magic causes the broker
+    // to net signals into one position, so only one TP gets honored.
+    magic:   leg === "tp3" ? 3 : leg === "tp2" ? 2 : 1,
   };
   return { signalId: toSignalId(setup.id, leg), body };
 }
@@ -117,16 +121,43 @@ async function sendOneLeg(setup, marketKey, leg) {
   }
 }
 
-// Send both legs (TP1 + TP2). One call per setup transition to ACTIVE.
+// Send all configured legs (TP1 + TP2 + optional TP3 runner).
+// One call per setup transition to ACTIVE.
 export async function notifySignal(setup, marketKey) {
   if (!setup?.id || setup.status !== "ACTIVE") return;
   if (!TOKEN || !STRATEGY_ID) {
     logLine(`SKIP (env missing) — market=${marketKey} setup=${setup.id}`);
     return;
   }
-  // TP2 first then TP1 — order doesn't matter functionally, but keeps logs readable.
   await sendOneLeg(setup, marketKey, "tp1");
   if (setup.tp2 != null) await sendOneLeg(setup, marketKey, "tp2");
+  if (setup.tp3 != null) await sendOneLeg(setup, marketKey, "tp3");
+}
+
+// Modify the SL of one already-open leg (used for TP3 runner: when TP2 hits we
+// move TP3's SL to entry so the runner is risk-free for the long-tail target).
+// PUT on the same signalId is upsert per CopyFactory docs — broker patches the
+// running position's stopLoss to the new value.
+export async function modifySignalSL(setup, marketKey, leg, newSL) {
+  if (!setup?.id || !TOKEN || !STRATEGY_ID) return;
+  const { signalId, body } = buildLegPayload(setup, marketKey, leg);
+  body.stopLoss = newSL;
+  body.time     = new Date().toISOString();   // refresh — old time would expire
+  const tag = `${marketKey} ${setup.direction} ${body.symbol} ${leg.toUpperCase()} BE-MOVE entry=${setup.entry} newSL=${newSL}`;
+  if (!COPY_LIVE) {
+    logLine(`PAPER modify-SL → ${tag} | signalId=${signalId}`);
+    return;
+  }
+  try {
+    await reqCopyFactory(
+      `/users/current/strategies/${STRATEGY_ID}/external-signals/${signalId}`,
+      "PUT",
+      body,
+    );
+    logLine(`MODIFY-SL ${leg.toUpperCase()} → ${tag} | signalId=${signalId}`);
+  } catch (err) {
+    logLine(`ERROR modify-SL | ${tag} | ${err.message}`);
+  }
 }
 
 async function cancelOneLeg(setup, leg) {
@@ -147,16 +178,17 @@ async function cancelOneLeg(setup, leg) {
   }
 }
 
-// Cancel one or both legs. Best-effort, non-fatal.
-//   leg = "tp1"  → TP1 leg only (when broker hits TP1)
-//   leg = "tp2"  → TP2 leg only (when broker hits TP2)
-//   leg = "all"  → both (SL hit, manual close, orphan cleanup) [default]
+// Cancel one or all legs. Best-effort, non-fatal. Cancelling an already-removed
+// signal is a no-op at the broker.
+//   leg = "tp1" / "tp2" / "tp3"  → that leg only
+//   leg = "all"                  → all three (SL hit, TP3 hit, orphan cleanup) [default]
 export async function cancelSignal(setup, leg = "all") {
   if (!setup?.id || !TOKEN || !STRATEGY_ID) return;
-  if (leg === "tp1" || leg === "tp2") {
+  if (leg === "tp1" || leg === "tp2" || leg === "tp3") {
     await cancelOneLeg(setup, leg);
   } else {
     await cancelOneLeg(setup, "tp1");
     await cancelOneLeg(setup, "tp2");
+    await cancelOneLeg(setup, "tp3");
   }
 }

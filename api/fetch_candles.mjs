@@ -1,6 +1,11 @@
 /**
  * Fetch multi-timeframe candles for all markets via MCP.
- * Saves: candles_15_MARKET.json, candles_1H_MARKET.json, candles_1D_MARKET.json
+ * Saves: candles_1m_MARKET.json, candles_15_MARKET.json, candles_1H_MARKET.json,
+ *        candles_1D_MARKET.json
+ *
+ * FILTER_TFS env var: comma-separated tvTF codes (e.g. "1" or "1,15"). Limits
+ * fetch to that subset — used in staging to fetch only 1m without overwriting
+ * the 15/1H/1D files (which staging shares via symlink with live).
  */
 import fetch from "node-fetch";
 import { readFileSync, writeFileSync } from "fs";
@@ -55,38 +60,96 @@ async function mcpCall(method, params = {}) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Symbol + price range. Range is used to detect symbol-switch lag: if MCP
+// returns candles whose close falls outside the range, the chart hadn't yet
+// switched, so we retry. Tightened to current realistic ranges (mirrors
+// monitor.js MARKETS) so cross-market contamination (NAS prices in BTC file
+// etc.) gets caught by the price-range guard.
 const MARKETS = {
-  NAS100: "CAPITALCOM:US100",
-  US500:  "CAPITALCOM:US500",
-  US30:   "CAPITALCOM:US30",
-  XAUUSD: "CAPITALCOM:GOLD",
-  GBPUSD: "FX:GBPUSD",
-  BTCUSD: "COINBASE:BTCUSD",
-  ETHUSD: "COINBASE:ETHUSD",
+  NAS100: { symbol: "CAPITALCOM:US100",  min: 18000, max: 35000 },
+  US500:  { symbol: "CAPITALCOM:US500",  min:  5500, max:  9000 },
+  US30:   { symbol: "CAPITALCOM:US30",   min: 38000, max: 60000 },
+  XAUUSD: { symbol: "CAPITALCOM:GOLD",   min:  3500, max:  6000 },
+  GBPUSD: { symbol: "FX:GBPUSD",         min:   1.1, max:   1.6 },
+  BTCUSD: { symbol: "COINBASE:BTCUSD",   min: 50000, max: 200000 },
+  ETHUSD: { symbol: "COINBASE:ETHUSD",   min:  1500, max:  3500 },
 };
 
 // Timeframes to fetch: [tvTF, count, fileSuffix]
-const TIMEFRAMES = [
+const ALL_TIMEFRAMES = [
   ["D",  500,  "1D"],  // daily candles — for weekly + daily structure analysis
   ["60", 1000, "1H"],  // 1h candles   — for 6h cycle analysis
   ["15", 2000, "15"],  // 15-min       — for live cycle display + current price
+  ["1",  2000, "1m"],  // 1-min        — for 22.5-min cycle analysis
 ];
 
-for (const [market, symbol] of Object.entries(MARKETS)) {
+// Optional FILTER_TFS env var: comma-separated tvTF codes to limit which TFs run.
+const _filter = (process.env.FILTER_TFS || env.FILTER_TFS || "").trim();
+const _filterSet = _filter ? new Set(_filter.split(",").map(s => s.trim())) : null;
+const TIMEFRAMES = _filterSet
+  ? ALL_TIMEFRAMES.filter(([tf]) => _filterSet.has(tf))
+  : ALL_TIMEFRAMES;
+if (_filterSet) {
+  console.log(`FILTER_TFS=${_filter} → fetching only: ${TIMEFRAMES.map(t => t[2]).join(", ")}`);
+}
+
+// Mirror monitor.js's market-hours gate: when an index/forex market is closed
+// (weekend or after Friday 17:00 ET), refetching its candles produces the same
+// data we already have on disk and just causes extra MCP/TradingView traffic
+// that competes with the always-open crypto fetches. Skip closed markets.
+const CRYPTO = new Set(["BTCUSD", "ETHUSD"]);
+function isOpen(marketKey) {
+  if (CRYPTO.has(marketKey)) return true;
+  const now = new Date();
+  const wd  = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].indexOf(
+    new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" }).format(now)
+  );
+  if (wd === 0 || wd === 6) return false; // weekend
+  // Hour-of-ET — basic Friday-late check; engine has finer windows but this
+  // is enough to skip Saturday morning fetches that ran on Friday's data.
+  const etH = parseInt(new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", hour: "2-digit", hour12: false }).format(now));
+  if (wd === 5 && etH >= 17) return false; // Friday after 17:00 ET
+  return true;
+}
+
+for (const [market, meta] of Object.entries(MARKETS)) {
+  if (!isOpen(market)) {
+    console.log(`\n=== ${market} — market closed, skipping ===`);
+    continue;
+  }
+  const { symbol, min: priceMin, max: priceMax } = meta;
   console.log(`\n=== ${market} (${symbol}) ===`);
   await mcpCall("tools/call", { name: "change_symbol", arguments: { symbol } });
-  await sleep(2000);
+  // 1m fetch needs longer settle time — chart history loads more bars after switch
+  await sleep(3500);
 
   for (const [tf, count, suffix] of TIMEFRAMES) {
     console.log(`  [${tf}] Fetching ${count} candles...`);
     try {
       await mcpCall("tools/call", { name: "change_timeframe", arguments: { timeframe: tf } });
-      await sleep(1500);
-      const result = await mcpCall("tools/call", { name: "get_bar_data", arguments: { count } });
-      const raw = result?.content?.[0]?.text;
-      if (!raw) { console.error(`    No data`); continue; }
-      const candles = JSON.parse(raw);
-      if (!Array.isArray(candles) || !candles.length) { console.error(`    Empty`); continue; }
+      await sleep(2500);
+      // Retry up to 5× on price-range mismatch (catches symbol-switch lag).
+      let candles = null;
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        const result = await mcpCall("tools/call", { name: "get_bar_data", arguments: { count } });
+        const raw = result?.content?.[0]?.text;
+        if (!raw) { console.error(`    No data (attempt ${attempt})`); await sleep(4000); continue; }
+        const c = JSON.parse(raw);
+        if (!Array.isArray(c) || !c.length) { console.error(`    Empty (attempt ${attempt})`); await sleep(4000); continue; }
+        const last = c[c.length - 1].close;
+        if (last < priceMin || last > priceMax) {
+          console.warn(`    Out-of-range close ${last} (attempt ${attempt}, range ${priceMin}-${priceMax}) — chart not switched yet, retrying`);
+          // Re-issue symbol+TF + extra settle time so the chart fully reloads
+          await mcpCall("tools/call", { name: "change_symbol",    arguments: { symbol } });
+          await sleep(2000);
+          await mcpCall("tools/call", { name: "change_timeframe", arguments: { timeframe: tf } });
+          await sleep(4000);
+          continue;
+        }
+        candles = c;
+        break;
+      }
+      if (!candles) { console.error(`    Gave up after 5 attempts — skipping ${market}/${tf}`); continue; }
       const outFile = join(__dir, `../monitor/candles_${suffix}_${market}.json`);
       writeFileSync(outFile, JSON.stringify(candles.slice(-count), null, 2));
       console.log(`    Saved ${candles.length} candles → range: ${candles[0].time_et} → ${candles[candles.length-1].time_et}`);

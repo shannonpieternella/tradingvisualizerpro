@@ -13,7 +13,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { MongoClient } from "mongodb";
 import { computeSweepSL, computeSweepTP, verifyOutcome } from "./lib-sl.mjs";
-import { notifySignal as cfNotifySignal, cancelSignal as cfCancelSignal } from "./copyfactory-bridge.js";
+import { notifySignal as cfNotifySignal, cancelSignal as cfCancelSignal, modifySignalSL as cfModifySignalSL } from "./copyfactory-bridge.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 
@@ -390,16 +390,19 @@ function verifyOrphanedActives(marketKey, candles, currentActiveId = null, daily
         entryPrice: actualEntry,
         sweepPrice: item.sweepPrice,
       });
-      const { tp1, tp2 } = computeSweepTP(item.direction, actualEntry, slPrice);
+      const { tp1, tp2, tp3 } = computeSweepTP(item.direction, actualEntry, slPrice);
       item.entry     = actualEntry;
       item.sl        = slPrice;
       item.tp1       = tp1;
       item.tp2       = tp2;
+      item.tp3       = tp3;
       item.entryTime = tsToETLabel(entryCandle.timestamp);
       item.entryTs   = entryCandle.timestamp * 1000;
       item.status    = "ACTIVE";
       item.tp1Hit    = false;
       item.tp2Hit    = false;
+      item.tp3Hit    = false;
+      item.slMovedToBE = false;
       item.slHit     = false;
       console.log(`[${marketKey}] ORPHAN TRIGGER: ${item.id} → ACTIVE entry=${actualEntry} sl=${slPrice} tp1=${tp1}`);
       dirty = true;
@@ -473,12 +476,16 @@ function reconcileActiveSetup(activeSetup) {
     sl:        activeSetup.sl,
     tp1:       activeSetup.tp1,
     tp2:       activeSetup.tp2,
+    tp3:       activeSetup.tp3,
     entry:     activeSetup.entry,
     entryTime: activeSetup.entryTime ?? match?.entryTime ?? null,
     entryTs:   activeSetup.entryTs   ?? match?.entryTs   ?? null,
     entryWindowTime: activeSetup.entryWindowTime ?? match?.entryWindowTime ?? null,
     entryWindowTs:   activeSetup.entryWindowTs   ?? match?.entryWindowTs   ?? null,
     tp1Hit:    !!activeSetup.tp1Hit,
+    tp2Hit:    !!activeSetup.tp2Hit,
+    tp3Hit:    !!activeSetup.tp3Hit,
+    slMovedToBE: !!activeSetup.slMovedToBE,
   };
   if (outcome) {
     patch.outcome     = outcome;
@@ -1986,6 +1993,7 @@ async function fireEntryTrigger(marketKey, setup, opts = {}) {
     sl:        setup.sl,
     tp1:       setup.tp1,
     tp2:       setup.tp2,
+    tp3:       setup.tp3,
     entryTime: setup.entryTime,
     entryTs:   setup.entryTs,
     status:    "ACTIVE",
@@ -2011,6 +2019,80 @@ async function fireEntryTrigger(marketKey, setup, opts = {}) {
     .catch(() => {});
 
   return { passed: true };
+}
+
+// Unified exit-event dispatcher. Pairs Discord + MetaApi-cancel/modify + log
+// + setup_log patch + weekly recap so each exit kind fires its full bundle of
+// side-effects from one place. State mutation (status/flags) stays in the
+// caller — that's where the price-comparison and branching live.
+//
+//   kind ∈ "SL_HIT" | "RUNNER_BE_STOP" | "TP1_HIT"
+//        | "TP2_HIT_RUNNER" | "TP2_HIT_LEGACY" | "TP3_HIT"
+async function fireTradeEvent(marketKey, setup, kind, opts = {}) {
+  const fp  = p => p > 100 ? p.toFixed(1) : p.toFixed(5);
+  const dir = setup.direction;
+  const entry = setup.entry;
+
+  switch (kind) {
+    case "SL_HIT": {
+      const sl = setup.sl;
+      logEvent(marketKey, "SL_HIT", `${dir} SL @ ${fp(sl)} | Entry was ${fp(entry)}`, "sl_hit");
+      updateSetupLogOutcome(setup.id, "LOSS", { outcomePrice: sl });
+      updateWeeklyRecap(marketKey, { type: "trade_loss" });
+      await sendDiscordTradeEvent(marketKey, "SL_HIT", `${dir} @ ${fp(entry)} → SL ${fp(sl)}`);
+      cfCancelSignal(setup, "all").catch(() => {});
+      return;
+    }
+    case "RUNNER_BE_STOP": {
+      const sl = setup.sl;
+      logEvent(marketKey, "RUNNER_BE_STOP", `${dir} runner stopped at BE @ ${fp(sl)} (TP2 already hit)`, "tp2_hit");
+      patchSetupLog(setup.id, { status: "CLOSED_TP2", runnerOutcome: "BE_STOP" });
+      await sendDiscordTradeEvent(marketKey, "RUNNER_BE_STOP", `${dir} runner BE-stop @ ${fp(sl)} (TP2 was hit)`);
+      cfCancelSignal(setup, "tp3").catch(() => {});
+      return;
+    }
+    case "TP1_HIT": {
+      const tp1 = setup.tp1;
+      logEvent(marketKey, "TP1_HIT", `${dir} TP1 @ ${fp(tp1)} ✅  (1R)`, "tp1_hit");
+      patchSetupLog(setup.id, { tp1Hit: true, tp1HitTime: tsToETDateTime(Date.now() / 1000) });
+      await sendDiscordTradeEvent(marketKey, "TP1_HIT", `${dir} @ ${fp(entry)} → TP1 ${fp(tp1)} ✅`);
+      cfCancelSignal(setup, "tp1").catch(() => {});
+      return;
+    }
+    case "TP2_HIT_RUNNER": {
+      const tp2 = setup.tp2, tp3 = setup.tp3, beSL = opts.beSL;
+      logEvent(marketKey, "TP2_HIT", `${dir} TP2 @ ${fp(tp2)} 🏆 (2R) — runner armed, SL→BE ${fp(beSL)}`, "tp2_hit");
+      patchSetupLog(setup.id, {
+        tp2Hit: true, tp2HitTime: tsToETDateTime(Date.now() / 1000),
+        status: "TP2_HIT_RUNNING", sl: beSL, slMovedToBE: true,
+      });
+      updateWeeklyRecap(marketKey, { type: "trade_win" });
+      await sendDiscordTradeEvent(marketKey, "TP2_HIT", `${dir} @ ${fp(entry)} → TP2 ${fp(tp2)} 🏆 — runner active to TP3 ${fp(tp3)} (SL@BE ${fp(beSL)})`);
+      cfCancelSignal(setup, "tp2").catch(() => {});
+      cfModifySignalSL(setup, marketKey, "tp3", beSL).catch(() => {});
+      return;
+    }
+    case "TP2_HIT_LEGACY": {
+      const tp2 = setup.tp2;
+      logEvent(marketKey, "TP2_HIT", `${dir} TP2 @ ${fp(tp2)} 🏆 (2R)`, "tp2_hit");
+      updateSetupLogOutcome(setup.id, "WIN", { outcomePrice: tp2 });
+      updateWeeklyRecap(marketKey, { type: "trade_win" });
+      await sendDiscordTradeEvent(marketKey, "TP2_HIT", `${dir} @ ${fp(entry)} → TP2 ${fp(tp2)} 🏆`);
+      cfCancelSignal(setup, "all").catch(() => {});
+      return;
+    }
+    case "TP3_HIT": {
+      const tp3 = setup.tp3;
+      logEvent(marketKey, "TP3_HIT", `${dir} TP3 @ ${fp(tp3)} 🚀 (10R runner)`, "tp3_hit");
+      updateSetupLogOutcome(setup.id, "WIN", { outcomePrice: tp3, rMulti: 10 });
+      patchSetupLog(setup.id, { tp3Hit: true, tp3HitTime: tsToETDateTime(Date.now() / 1000), status: "CLOSED_TP3" });
+      await sendDiscordTradeEvent(marketKey, "TP3_HIT", `${dir} @ ${fp(entry)} → TP3 ${fp(tp3)} 🚀 (10R runner!)`);
+      cfCancelSignal(setup, "tp3").catch(() => {});
+      return;
+    }
+    default:
+      console.warn(`[${marketKey}] fireTradeEvent: unknown kind "${kind}"`);
+  }
 }
 
 async function sendDiscordEntryWindow(setup /*, windowLabel*/) {
@@ -2307,7 +2389,7 @@ function isMarketOpen(marketKey) {
   const etWd = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].indexOf(
     new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", weekday: "short" }).format(now)
   );
-  if (etWd === 0) return false; // Sunday
+  if (etWd === 0 && etH < 18) return false; // Sunday before 18:00 ET (markets reopen at 18:00 ET = trading-day anchor)
   if (etWd === 6) return false; // Saturday
   if (etWd === 5 && etH >= 17) return false; // Friday after 17:00
   return true;
@@ -2589,7 +2671,9 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
     // (1b) SL drift check: if this setup is ACTIVE/CLOSED and has step2Ts +
     //      entryTs, recompute the canonical SL and correct it if it drifted.
     //      This makes the code self-healing — no more manual re-audits.
-    if (activeSetup.step2Ts && activeSetup.entryTs && activeSetup.entry) {
+    //      Skip when slMovedToBE — after TP2 we intentionally moved SL to entry
+    //      for the runner; the canonical sweep-window SL is no longer correct.
+    if (activeSetup.step2Ts && activeSetup.entryTs && activeSetup.entry && !activeSetup.slMovedToBE) {
       const entryTsSec = activeSetup.entryTs > 1e12 ? activeSetup.entryTs / 1000 : activeSetup.entryTs;
       const canonicalSL = computeSweepSL({
         direction:  activeSetup.direction,
@@ -2606,6 +2690,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
         const tpRes     = computeSweepTP(activeSetup.direction, activeSetup.entry, canonicalSL);
         activeSetup.tp1 = tpRes.tp1;
         activeSetup.tp2 = tpRes.tp2;
+        activeSetup.tp3 = tpRes.tp3;
         repaired = true;
       }
     }
@@ -2810,7 +2895,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
       sslLevel,
       level:           entryPrice,
       entry:           entryPrice,
-      sl: null, tp1: null, tp2: null,
+      sl: null, tp1: null, tp2: null, tp3: null,
       sweepPrice,
       step1Time,
       step2Time,
@@ -2829,7 +2914,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
       entryTime:       null,         // set when entry triggers
       entryTriggered:  false,
       windowAlertSent: false,
-      tp1Hit: false, tp2Hit: false, slHit: false,
+      tp1Hit: false, tp2Hit: false, tp3Hit: false, slHit: false, slMovedToBE: false,
     };
 
     logEvent(marketKey, "SETUP_CREATED", `${direction} | ${tf} both swept | [${cycleLabel}] | Window: ${setup.nextPhase2Label}`, "setup_active");
@@ -2860,7 +2945,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
       entryWindowTime,
       entryWindowTs,
       status:    "WAITING_PHASE2",
-      sl: null, tp1: null, tp2: null,
+      sl: null, tp1: null, tp2: null, tp3: null,
       ts:        Date.now(),
       datetime:  tsToETDateTime(Date.now() / 1000),
       outcome:   null,
@@ -2899,12 +2984,15 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
         entryPrice: actualEntry,
         sweepPrice: activeSetup.sweepPrice,
       });
-      const { tp1, tp2 } = computeSweepTP(activeSetup.direction, actualEntry, slPrice);
+      const { tp1, tp2, tp3 } = computeSweepTP(activeSetup.direction, actualEntry, slPrice);
       activeSetup.entry = actualEntry;
       activeSetup.level = actualEntry;
       activeSetup.sl = slPrice;
       activeSetup.tp1 = tp1;
       activeSetup.tp2 = tp2;
+      activeSetup.tp3 = tp3;
+      activeSetup.tp3Hit = false;
+      activeSetup.slMovedToBE = false;
       activeSetup.entryTriggered = true;
       activeSetup.status = "ACTIVE";
       activeSetup.entryTs = entryCandle.timestamp * 1000;
@@ -2960,9 +3048,12 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
         activeSetup.entry = +actualEntry.toFixed(dec);
         activeSetup.level = activeSetup.entry;
         activeSetup.sl    = slPrice;
-        const { tp1, tp2 } = computeSweepTP(activeSetup.direction, activeSetup.entry, activeSetup.sl);
+        const { tp1, tp2, tp3 } = computeSweepTP(activeSetup.direction, activeSetup.entry, activeSetup.sl);
         activeSetup.tp1 = tp1;
         activeSetup.tp2 = tp2;
+        activeSetup.tp3 = tp3;
+        activeSetup.tp3Hit = false;
+        activeSetup.slMovedToBE = false;
 
         activeSetup.entryTriggered = true;
         activeSetup.status  = "ACTIVE";
@@ -2985,69 +3076,90 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   }
 
   // ── Active trade monitoring ───────────────────────────────────────────────
-  if (activeSetup && activeSetup.status === "ACTIVE") {
-    const { direction, entry, sl, tp1, tp2 } = activeSetup;
+  // Two live states are watched here: "ACTIVE" (pre-TP2) and "TP2_HIT_RUNNING"
+  // (post-TP2, runner leg still open with SL trailed to entry / breakeven).
+  if (activeSetup && (activeSetup.status === "ACTIVE" || activeSetup.status === "TP2_HIT_RUNNING")) {
+    const { direction, entry, sl, tp1, tp2, tp3 } = activeSetup;
     const fp = p => p > 100 ? p.toFixed(1) : p.toFixed(5);
+    const isRunner = activeSetup.status === "TP2_HIT_RUNNING";
 
-    // Check SL
+    // Check SL (current sl reflects entry once slMovedToBE). Discord +
+    // MetaApi side-effects unified in fireTradeEvent.
     if (!activeSetup.slHit) {
       const slHit = direction === "BUY"
         ? candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.low  <= sl)
         : candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.high >= sl);
       if (slHit) {
         activeSetup.slHit = true;
-        activeSetup.status = "CLOSED_SL";
-        logEvent(marketKey, "SL_HIT", `${direction} SL @ ${fp(sl)} | Entry was ${fp(entry)}`, "sl_hit");
-        updateSetupLogOutcome(activeSetup.id, "LOSS", { outcomePrice: sl });
-        updateWeeklyRecap(marketKey, { type: "trade_loss" });
-        await sendDiscordTradeEvent(marketKey, "SL_HIT", `${direction} @ ${fp(entry)} → SL ${fp(sl)}`);
-        // SL hits both legs (same SL on TP1 + TP2 leg) — cancel both signals.
-        cfCancelSignal(activeSetup, "all").catch(() => {});
+        if (isRunner) {
+          // Runner stopped at BE after TP2 already filled — overall WIN @ 2R.
+          activeSetup.status = "CLOSED_TP2";
+          await fireTradeEvent(marketKey, activeSetup, "RUNNER_BE_STOP");
+        } else {
+          activeSetup.status = "CLOSED_SL";
+          await fireTradeEvent(marketKey, activeSetup, "SL_HIT");
+        }
         saveSetup(marketKey, activeSetup);
       }
     }
 
-    // Check TP1
-    if (!activeSetup.tp1Hit && !activeSetup.slHit) {
+    // Check TP1 (only relevant pre-runner)
+    if (!isRunner && !activeSetup.tp1Hit && !activeSetup.slHit) {
       const tp1Hit = direction === "BUY"
         ? candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.high >= tp1)
         : candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.low  <= tp1);
       if (tp1Hit) {
         activeSetup.tp1Hit = true;
-        logEvent(marketKey, "TP1_HIT", `${direction} TP1 @ ${fp(tp1)} ✅  (1:2 RR)`, "tp1_hit");
-        patchSetupLog(activeSetup.id, { tp1Hit: true, tp1HitTime: tsToETDateTime(Date.now() / 1000) });
-        await sendDiscordTradeEvent(marketKey, "TP1_HIT", `${direction} @ ${fp(entry)} → TP1 ${fp(tp1)} ✅`);
-        // Close TP1 leg only — TP2 leg keeps running until TP2 or SL.
-        cfCancelSignal(activeSetup, "tp1").catch(() => {});
+        await fireTradeEvent(marketKey, activeSetup, "TP1_HIT");
         saveSetup(marketKey, activeSetup);
       }
     }
 
-    // Check TP2
-    if (!activeSetup.tp2Hit && !activeSetup.slHit) {
+    // Check TP2 (only relevant pre-runner). If tp3 leg exists → trade does NOT
+    // close on TP2: cancel only the tp2 leg, move tp3's SL to entry, and
+    // transition to TP2_HIT_RUNNING for the long-tail runner.
+    if (!isRunner && !activeSetup.tp2Hit && !activeSetup.slHit) {
       const tp2Hit = direction === "BUY"
         ? candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.high >= tp2)
         : candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.low  <= tp2);
       if (tp2Hit) {
         activeSetup.tp2Hit = true;
-        activeSetup.status = "CLOSED_TP2";
-        logEvent(marketKey, "TP2_HIT", `${direction} TP2 @ ${fp(tp2)} 🏆  (1:3 RR)`, "tp2_hit");
-        updateSetupLogOutcome(activeSetup.id, "WIN", { outcomePrice: tp2 });
-        updateWeeklyRecap(marketKey, { type: "trade_win" });
-        await sendDiscordTradeEvent(marketKey, "TP2_HIT", `${direction} @ ${fp(entry)} → TP2 ${fp(tp2)} 🏆`);
-        // Close TP2 leg. TP1 leg should already be cancelled (TP1 is always
-        // crossed before TP2), but cancel both to be safe — cancelling an
-        // already-removed signal is a no-op.
-        cfCancelSignal(activeSetup, "all").catch(() => {});
+        const hasRunner = tp3 != null && !activeSetup.slMovedToBE;
+        if (hasRunner) {
+          const beSL = activeSetup.entry;
+          activeSetup.sl = beSL;
+          activeSetup.slMovedToBE = true;
+          activeSetup.status = "TP2_HIT_RUNNING";
+          await fireTradeEvent(marketKey, activeSetup, "TP2_HIT_RUNNER", { beSL });
+        } else {
+          activeSetup.status = "CLOSED_TP2";
+          await fireTradeEvent(marketKey, activeSetup, "TP2_HIT_LEGACY");
+        }
         saveSetup(marketKey, activeSetup);
       }
     }
 
-    // Live PnL log
+    // Check TP3 (runner target, 10R) — only when runner is armed.
+    if (isRunner && !activeSetup.tp3Hit && !activeSetup.slHit && tp3 != null) {
+      const tp3Hit = direction === "BUY"
+        ? candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.high >= tp3)
+        : candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.low  <= tp3);
+      if (tp3Hit) {
+        activeSetup.tp3Hit = true;
+        activeSetup.status = "CLOSED_TP3";
+        await fireTradeEvent(marketKey, activeSetup, "TP3_HIT");
+        saveSetup(marketKey, activeSetup);
+      }
+    }
+
+    // Live PnL log — risk reference uses the original entry-to-SL distance
+    // (so the R-multiple stays meaningful even after SL is trailed to BE).
     const pnl = direction === "BUY" ? currentPrice - entry : entry - currentPrice;
-    const risk = Math.abs(entry - sl);
-    const rr   = risk > 0 ? (pnl / risk).toFixed(2) : "0";
-    logEvent(marketKey, "TRADE_ACTIVE", `${direction} | Entry: ${fp(entry)} | Now: ${fp(currentPrice)} | PnL: ${pnl > 0 ? "+" : ""}${pnl.toFixed(1)} pts | ${rr}R`, "active");
+    const refRisk = activeSetup.slMovedToBE && tp1 != null
+      ? Math.abs(entry - tp1)            // 1R = entry→tp1 distance once SL is on BE
+      : Math.abs(entry - sl);
+    const rr   = refRisk > 0 ? (pnl / refRisk).toFixed(2) : "0";
+    logEvent(marketKey, "TRADE_ACTIVE", `${direction} | Entry: ${fp(entry)} | Now: ${fp(currentPrice)} | PnL: ${pnl > 0 ? "+" : ""}${pnl.toFixed(1)} pts | ${rr}R${isRunner ? " | RUNNER" : ""}`, "active");
   }
 
   // Reconcile: ensure setup_log reflects the canonical state of the active

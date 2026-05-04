@@ -2,7 +2,7 @@
 LOCKFILE=/tmp/blackbull_monitor.lock
 # Max runtime per tick. If monitor.js hangs (MCP/Mongo network stall), we
 # don't want to block future cron ticks — SIGKILL and release the lock.
-MAX_SEC=180
+MAX_SEC=300
 # If an existing lock's owner has been running longer than MAX_SEC, it's hung.
 # Kill the tree and take the lock ourselves.
 if [ -f "$LOCKFILE" ]; then

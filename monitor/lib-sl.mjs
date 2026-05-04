@@ -24,16 +24,18 @@ export function computeSweepSL({ direction, candles, step2Ts, entryTs, entryPric
   }
 }
 
-// Strategy: TP1 at 1R (primary target = WIN threshold), TP2 at 2R (stretch).
+// Strategy: TP1 at 1R, TP2 at 2R, TP3 at 10R (runner — SL trails to entry once
+// TP2 is hit, so TP3 leg runs risk-free for the long-tail target).
 // Outcome verification records which TP was reached first before SL:
 //   SL before TP1 → LOSS
-//   TP1 hit → WIN (rMulti=1); if TP2 also hit after → rMulti=2
+//   TP1 hit → WIN (rMulti=1); TP2 also hit → rMulti=2; TP3 also hit → rMulti=10
 export function computeSweepTP(direction, entry, sl) {
   const dec = entry > 100 ? 1 : 5;
   const risk = Math.abs(entry - sl);
   return {
-    tp1: +(direction === "BUY" ? entry + 1 * risk : entry - 1 * risk).toFixed(dec),
-    tp2: +(direction === "BUY" ? entry + 2 * risk : entry - 2 * risk).toFixed(dec),
+    tp1: +(direction === "BUY" ? entry + 1  * risk : entry - 1  * risk).toFixed(dec),
+    tp2: +(direction === "BUY" ? entry + 2  * risk : entry - 2  * risk).toFixed(dec),
+    tp3: +(direction === "BUY" ? entry + 10 * risk : entry - 10 * risk).toFixed(dec),
     risk: +risk.toFixed(dec),
   };
 }

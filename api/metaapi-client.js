@@ -120,6 +120,16 @@ export async function getOpenPositions(accountId) {
   return req(MT_CLIENT_HOST, `/users/current/accounts/${accountId}/positions`);
 }
 
+// Close a single open position on a subscriber account. MetaApi expects the
+// position id and an actionType. We use POSITION_CLOSE_ID which closes the
+// full volume immediately at market price.
+export async function closePositionById(accountId, positionId) {
+  return req(MT_CLIENT_HOST, `/users/current/accounts/${accountId}/trade`, "POST", {
+    actionType: "POSITION_CLOSE_ID",
+    positionId,
+  });
+}
+
 export async function deleteAccount(accountId) {
   // MetaApi soft-deletes by default; pass force=true to hard-delete immediately.
   return req(PROVISIONING_HOST, `/users/current/accounts/${accountId}`, "DELETE");
