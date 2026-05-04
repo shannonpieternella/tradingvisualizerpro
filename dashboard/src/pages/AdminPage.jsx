@@ -93,7 +93,28 @@ export default function AdminPage() {
 
   // Trade tab state
   const [positions, setPositions] = useState([]);
-  const [tradeForm, setTradeForm] = useState({ market: "ETHUSD", direction: "SELL", sl: "", tp1: "", tp2: "", volume: "" });
+  const [tradeForm, setTradeForm] = useState({ market: "ETHUSD", direction: "SELL", entry: "", sl: "", volume: "" });
+
+  // Live TP preview — same 1R/2R/10R rule as the server's computeSweepTP, so
+  // the form mirrors what'll actually be dispatched. Returns null until both
+  // entry + sl are valid numbers and on the correct side of each other.
+  const tpPreview = (() => {
+    const e = Number(tradeForm.entry);
+    const s = Number(tradeForm.sl);
+    if (!Number.isFinite(e) || e <= 0 || !Number.isFinite(s) || s <= 0) return null;
+    const isBuy = tradeForm.direction === "BUY";
+    if (isBuy && s >= e) return { error: "SL moet onder entry voor BUY" };
+    if (!isBuy && s <= e) return { error: "SL moet boven entry voor SELL" };
+    const risk = Math.abs(e - s);
+    const dec = e > 100 ? 1 : 5;
+    const fmt = v => v.toFixed(dec);
+    return {
+      risk: fmt(risk),
+      tp1:  fmt(isBuy ? e + risk        : e - risk),
+      tp2:  fmt(isBuy ? e + risk * 2    : e - risk * 2),
+      tp3:  fmt(isBuy ? e + risk * 10   : e - risk * 10),
+    };
+  })();
   const [tradeMsg,  setTradeMsg]  = useState(null);
   const [posLoading, setPosLoading] = useState(false);
   const refreshPositions = useCallback(async () => {
@@ -108,12 +129,13 @@ export default function AdminPage() {
   async function submitTrade(e) {
     e.preventDefault();
     setTradeMsg(null);
+    // Server auto-computes TP1/TP2/TP3 (1R/2R/10R) from entry+sl using the
+    // same formula as the auto-engine. Operator only needs entry + sl.
     const body = {
       market:    tradeForm.market,
       direction: tradeForm.direction,
       sl:  Number(tradeForm.sl),
-      tp1: Number(tradeForm.tp1),
-      ...(tradeForm.tp2    !== "" ? { tp2:    Number(tradeForm.tp2)    } : {}),
+      ...(tradeForm.entry  !== "" ? { entry:  Number(tradeForm.entry)  } : {}),
       ...(tradeForm.volume !== "" ? { volume: Number(tradeForm.volume) } : {}),
     };
     try {
@@ -446,7 +468,7 @@ export default function AdminPage() {
           <div className="ap-card">
             <h3>Manual trade — direct CopyFactory signal</h3>
             <p className="ap-vnc-hint">
-              Verstuurt een signal via dezelfde bridge die de auto-engine ook gebruikt. CopyFactory repliceert naar alle subscribers met hun eigen risk-scaling. Met TP1 alleen wordt 1 leg verstuurd; met TP1 + TP2 wordt 't gesplitst (1R + 2R).
+              Vul alleen <b>entry</b> en <b>SL</b> in — TP1 (1R), TP2 (2R) en TP3 (10R runner) worden automatisch berekend met dezelfde formule als de auto-engine. Verstuurt 3 legs naar CopyFactory; subscribers krijgen ze met hun eigen risk-scaling. Entry leeg laten = huidige market price.
               <br /><b>Lock bias-mode</b> filtert alleen welke richting de auto-engine accepteert; voor een directe handmatige trade gebruik dit formulier.
             </p>
             <form className="ap-trade-form" onSubmit={submitTrade}>
@@ -471,20 +493,31 @@ export default function AdminPage() {
                     onChange={e => setTradeForm(f => ({ ...f, volume: e.target.value }))} />
                 </label>
               </div>
-              <div className="ap-trade-divider">Levels</div>
+              <div className="ap-trade-divider">Entry + SL</div>
               <div className="ap-trade-row">
+                <label>Entry <span className="ap-label-hint">(leeg = market)</span>
+                  <input type="number" step="0.0001" placeholder="market price" value={tradeForm.entry}
+                    onChange={e => setTradeForm(f => ({ ...f, entry: e.target.value }))} />
+                </label>
                 <label>Stop Loss
                   <input type="number" step="0.0001" required placeholder="—" value={tradeForm.sl}
                     onChange={e => setTradeForm(f => ({ ...f, sl: e.target.value }))} />
                 </label>
-                <label>TP1 <span className="ap-label-hint">(1R)</span>
-                  <input type="number" step="0.0001" required placeholder="—" value={tradeForm.tp1}
-                    onChange={e => setTradeForm(f => ({ ...f, tp1: e.target.value }))} />
-                </label>
-                <label>TP2 <span className="ap-label-hint">(2R, optioneel)</span>
-                  <input type="number" step="0.0001" placeholder="—" value={tradeForm.tp2}
-                    onChange={e => setTradeForm(f => ({ ...f, tp2: e.target.value }))} />
-                </label>
+              </div>
+              <div className="ap-trade-divider">Auto-TP (1R · 2R · 10R)</div>
+              <div className="ap-trade-row" style={{ alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
+                {tpPreview?.error ? (
+                  <span className="ap-trade-err">⚠ {tpPreview.error}</span>
+                ) : tpPreview ? (
+                  <>
+                    <span><b>Risk:</b> {tpPreview.risk} pts</span>
+                    <span><b>TP1:</b> {tpPreview.tp1}</span>
+                    <span><b>TP2:</b> {tpPreview.tp2}</span>
+                    <span><b>TP3:</b> {tpPreview.tp3}</span>
+                  </>
+                ) : (
+                  <span className="ap-label-hint">Vul entry + SL voor auto-berekening</span>
+                )}
               </div>
               <div className="ap-trade-actions">
                 <button type="submit" className="ap-btn-primary">⚡ Verstuur signal</button>

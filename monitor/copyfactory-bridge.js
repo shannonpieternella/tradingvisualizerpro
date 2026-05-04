@@ -102,12 +102,26 @@ function buildLegPayload(setup, marketKey, leg) {
   return { signalId: toSignalId(setup.id, leg), body };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Bridge dispatch contract — returns { ok, results } per call zodat de
+// monitor.js caller kan zien of ELKE leg door de broker is geaccepteerd.
+//
+// Vroeger was dit fire-and-forget: errors werden silent geswallowed in de
+// per-leg try/catch, en de caller zette `metaApiDispatched=true` ook als de
+// broker faalde (bijv. "Symbol US500 not found"). Daardoor bleven mislukte
+// trades onzichtbaar en werd de recovery getriggered op niet bestaande state.
+//
+// Nu: elke leg geeft {ok:true|false, signalId, error?}. notifySignal aggreert
+// → ok=true alléén als ALLE legs slaagden. fireEntryTrigger en het recovery-
+// pad in monitor.js gebruiken die ok-flag om te bepalen of we
+// metaApiDispatched kunnen flaggen óf moeten retry'en.
+// ─────────────────────────────────────────────────────────────────────────────
 async function sendOneLeg(setup, marketKey, leg) {
   const { signalId, body } = buildLegPayload(setup, marketKey, leg);
   const tag = `${marketKey} ${setup.direction} ${body.symbol} ${leg.toUpperCase()} entry=${setup.entry} sl=${setup.sl} tp=${body.takeProfit}`;
   if (!COPY_LIVE) {
     logLine(`PAPER signal → ${tag} | signalId=${signalId}`);
-    return;
+    return { ok: true, leg, signalId, paper: true };
   }
   try {
     await reqCopyFactory(
@@ -116,22 +130,30 @@ async function sendOneLeg(setup, marketKey, leg) {
       body,
     );
     logLine(`SENT signal → ${tag} | signalId=${signalId}`);
+    return { ok: true, leg, signalId };
   } catch (err) {
     logLine(`ERROR sending signal | ${tag} | ${err.message}`);
+    return { ok: false, leg, signalId, error: err.message };
   }
 }
 
-// Send all configured legs (TP1 + TP2 + optional TP3 runner).
-// One call per setup transition to ACTIVE.
+// Send all configured legs (TP1 + TP2 + optional TP3 runner). Returns an
+// aggregate { ok, results } where ok=true only if EVERY configured leg was
+// accepted by the broker. Caller (fireEntryTrigger / recovery) flips
+// metaApiDispatched=true only when ok=true so a failed dispatch keeps
+// re-firing on the next tick instead of silently giving up.
 export async function notifySignal(setup, marketKey) {
-  if (!setup?.id || setup.status !== "ACTIVE") return;
+  if (!setup?.id || setup.status !== "ACTIVE") return { ok: false, results: [], skipped: "not-active" };
   if (!TOKEN || !STRATEGY_ID) {
     logLine(`SKIP (env missing) — market=${marketKey} setup=${setup.id}`);
-    return;
+    return { ok: false, results: [], skipped: "env-missing" };
   }
-  await sendOneLeg(setup, marketKey, "tp1");
-  if (setup.tp2 != null) await sendOneLeg(setup, marketKey, "tp2");
-  if (setup.tp3 != null) await sendOneLeg(setup, marketKey, "tp3");
+  const results = [];
+  results.push(await sendOneLeg(setup, marketKey, "tp1"));
+  if (setup.tp2 != null) results.push(await sendOneLeg(setup, marketKey, "tp2"));
+  if (setup.tp3 != null) results.push(await sendOneLeg(setup, marketKey, "tp3"));
+  const allOk = results.every(r => r.ok);
+  return { ok: allOk, results };
 }
 
 // Modify the SL of one already-open leg (used for TP3 runner: when TP2 hits we

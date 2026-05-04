@@ -14,6 +14,8 @@ import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { computeBias, runBacktest, runBacktestV2, generateBacktestInsights, analyzeTopDown, analyzeWeeklyStructure, analyzeDailyStructure, analyzeCycleStructure, groupCandlesByDay, groupCandlesByWeek, getFractalSignals, runFractalLockBacktest, getLiveFractalSignals } from "./bias-engine.js";
+import { notifySignal as cfNotifySignal } from "../monitor/copyfactory-bridge.js";
+import { computeSweepTP } from "../monitor/lib-sl.mjs";
 // MetaApi client is imported below after env is loaded onto process.env, so the
 // module sees the token at import time.
 
@@ -1339,6 +1341,109 @@ app.get("/api/admin/broker-analytics", requireAuth, requireAdmin, async (req, re
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Admin positions endpoints — bulk close van trades over alle subscribers
+// ───────────────────────────────────────────────────────────────────────────────
+// GET  /api/admin/positions       → flat lijst van álle open posities, met
+//                                   user/account context zodat admin ziet
+//                                   wie wat heeft staan
+// POST /api/admin/close-position  → 2 modes:
+//      { accountId, positionId }  → sluit één specifieke positie
+//      { symbol: "US500" }        → sluit elke open US500 op iedere subscriber
+//
+// Best-effort: één faal blokkeert de rest niet. Resultaat: { closed:[…], failed:[…] }.
+// ═══════════════════════════════════════════════════════════════════════════════
+app.get("/api/admin/positions", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const rows = await BrokerAccount.find({}).lean();
+    const userIds = [...new Set(rows.map(r => String(r.userId)))];
+    const users   = await User.find({ _id: { $in: userIds } }, { name: 1, email: 1 }).lean();
+    const userMap = Object.fromEntries(users.map(u => [String(u._id), u]));
+
+    const flat = [];
+    await Promise.all(rows.map(async (r) => {
+      const positions = await metaapi.getOpenPositions(r.metaapiAccountId).catch(() => []);
+      if (!Array.isArray(positions)) return;
+      for (const p of positions) {
+        flat.push({
+          accountId:  r.metaapiAccountId,
+          brokerRowId: String(r._id),
+          userId:     String(r.userId),
+          userName:   userMap[String(r.userId)]?.name  ?? null,
+          userEmail:  userMap[String(r.userId)]?.email ?? null,
+          login:      r.login,
+          server:     r.server,
+          broker:     r.broker,
+          positionId: p.id,
+          symbol:     p.symbol,
+          type:       p.type,
+          volume:     p.volume,
+          openPrice:  p.openPrice,
+          currentPrice: p.currentPrice,
+          stopLoss:   p.stopLoss,
+          takeProfit: p.takeProfit,
+          profit:     p.profit,
+          swap:       p.swap,
+          commission: p.commission,
+          time:       p.time,
+          comment:    p.brokerComment,
+        });
+      }
+    }));
+
+    flat.sort((a, b) => (b.time ?? "").localeCompare(a.time ?? ""));
+    res.json({ ok: true, positions: flat, fetchedAt: new Date().toISOString() });
+  } catch (err) {
+    console.error("/api/admin/positions:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/admin/close-position — close one position (by accountId+positionId)
+// or close every position matching a symbol across all subscribers (by symbol).
+// Closing is best-effort per account: one failure doesn't block the others.
+app.post("/api/admin/close-position", requireAuth, requireAdmin, async (req, res) => {
+  const { accountId, positionId, symbol } = req.body ?? {};
+
+  // Single-position close path.
+  if (accountId && positionId) {
+    try {
+      await metaapi.closePositionById(accountId, positionId);
+      console.log(`[CLOSE-POS] ${req.user?.email ?? "?"} → ${accountId}/${positionId}`);
+      return res.json({ ok: true, accountId, positionId });
+    } catch (err) {
+      return res.status(502).json({ ok: false, error: err.message });
+    }
+  }
+
+  // Bulk close-by-symbol path.
+  if (symbol) {
+    try {
+      const rows = await BrokerAccount.find({}).lean();
+      const closed = [], failed = [];
+      await Promise.all(rows.map(async (r) => {
+        const positions = await metaapi.getOpenPositions(r.metaapiAccountId).catch(() => []);
+        if (!Array.isArray(positions)) return;
+        const matches = positions.filter(p => p.symbol === symbol);
+        for (const p of matches) {
+          try {
+            await metaapi.closePositionById(r.metaapiAccountId, p.id);
+            closed.push({ accountId: r.metaapiAccountId, positionId: p.id, login: r.login });
+          } catch (err) {
+            failed.push({ accountId: r.metaapiAccountId, positionId: p.id, login: r.login, error: err.message });
+          }
+        }
+      }));
+      console.log(`[CLOSE-SYMBOL] ${req.user?.email ?? "?"} → ${symbol} closed=${closed.length} failed=${failed.length}`);
+      return res.json({ ok: true, symbol, closed, failed });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
+  }
+
+  return res.status(400).json({ ok: false, error: "either {accountId, positionId} or {symbol} required" });
+});
+
 // POST /api/signal-view — log that a user saw a signal-card on the dashboard.
 // Fired by IntersectionObserver after the card has been visible for ≥1.5 sec.
 app.post("/api/signal-view", requireAuth, async (req, res) => {
@@ -2480,6 +2585,120 @@ app.post("/api/admin/bias", requireAuth, requireAdmin, (req, res) => {
   writeAdminBiasFile(data);
   console.log(`[BIAS] ${market} → ${direction}`);
   res.json({ ok: true, market, direction, bias: data });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Manual-trade endpoint — admin can fire een trade direct vanuit het dashboard
+// ───────────────────────────────────────────────────────────────────────────────
+// POST /api/admin/manual-trade
+// Body: { market, direction, sl, tp1?, tp2?, tp3?, entry?, volume? }
+//
+// Wat dit doet:
+//   1. Validate input (markt bestaat, BUY/SELL, SL geometrie klopt vs entry)
+//   2. Auto-bereken TP1/TP2/TP3 uit entry+sl met dezelfde computeSweepTP als
+//      de auto-engine (1R / 2R / 10R risk-multiples). Caller mag overriden.
+//   3. Bouw een kunstmatige ACTIVE setup en stuur via dezelfde CopyFactory
+//      bridge die de auto-trigger gebruikt → CopyFactory repliceert naar
+//      alle subscribers met hun eigen risk-scaling.
+//   4. Append naar setup_log zodat het dashboard de manual trade toont.
+//
+// Use case: als de auto-trigger faalt en de recovery-tick nog niet heeft
+// gelopen, kan de admin via /admin → Trade tab handmatig de trade alsnog
+// firen. Geen SSH/curl nodig.
+// ═══════════════════════════════════════════════════════════════════════════════
+const SETUP_LOG_FILE_API = join(__dir, "../monitor/setup_log.json");
+
+app.post("/api/admin/manual-trade", requireAuth, requireAdmin, async (req, res) => {
+  const KNOWN = ["NAS100", "US500", "US30", "XAUUSD", "GBPUSD", "BTCUSD", "ETHUSD"];
+  const { market, direction, sl, tp1, tp2, tp3, entry, volume } = req.body ?? {};
+
+  if (!KNOWN.includes(market)) return res.status(400).json({ ok: false, error: `market must be one of ${KNOWN.join(", ")}` });
+  if (direction !== "BUY" && direction !== "SELL") return res.status(400).json({ ok: false, error: "direction must be BUY or SELL" });
+  const slN  = Number(sl);
+  if (!Number.isFinite(slN)  || slN  <= 0) return res.status(400).json({ ok: false, error: "sl must be a positive number" });
+  // TP1/TP2/TP3 are auto-computed from entry+sl using the same 1R/2R/10R rule
+  // the auto-engine uses (computeSweepTP). Caller may override any leg by
+  // passing an explicit value; otherwise we derive from entry+sl below.
+  const tp1Override = tp1 != null && tp1 !== "" ? Number(tp1) : null;
+  const tp2Override = tp2 != null && tp2 !== "" ? Number(tp2) : null;
+  const tp3Override = tp3 != null && tp3 !== "" ? Number(tp3) : null;
+  for (const [name, v] of [["tp1", tp1Override], ["tp2", tp2Override], ["tp3", tp3Override]]) {
+    if (v != null && (!Number.isFinite(v) || v <= 0)) return res.status(400).json({ ok: false, error: `${name} must be a positive number` });
+  }
+
+  // Entry defaults to current price from market_data file (last known) so the
+  // operator doesn't have to re-type it. Caller can override.
+  let entryN = entry != null && entry !== "" ? Number(entry) : null;
+  if (entryN == null || !Number.isFinite(entryN)) {
+    try {
+      const md = JSON.parse(readFileSync(join(__dir, `../monitor/market_data_${market}.json`), "utf8"));
+      entryN = Number(md.currentPrice);
+    } catch { /* falls through to error below */ }
+  }
+  if (!Number.isFinite(entryN) || entryN <= 0) return res.status(400).json({ ok: false, error: "entry could not be determined; pass an explicit entry price" });
+
+  // Direction sanity vs SL geometry. Operators occasionally type SL on the
+  // wrong side (e.g. SL above entry on a BUY) — refuse rather than dispatch a
+  // signal the broker will reject anyway.
+  if (direction === "BUY"  && slN >= entryN) return res.status(400).json({ ok: false, error: "BUY: SL must be below entry" });
+  if (direction === "SELL" && slN <= entryN) return res.status(400).json({ ok: false, error: "SELL: SL must be above entry" });
+
+  // Auto-compute TPs from entry+sl (1R/2R/10R) — same formula the auto-engine
+  // uses, so manual + auto trades have identical R-multiples.
+  const computed = computeSweepTP(direction, entryN, slN);
+  const tp1N = tp1Override ?? computed.tp1;
+  const tp2N = tp2Override ?? computed.tp2;
+  const tp3N = tp3Override ?? computed.tp3;
+
+  const setupId = `${market}-MANUAL-${Date.now()}`;
+  const nowIso  = new Date().toISOString();
+  const setup = {
+    id:         setupId,
+    market,
+    direction,
+    tf:         "manual",
+    source:     "manual",
+    status:     "ACTIVE",       // bridge requires ACTIVE to dispatch
+    entry:      entryN,
+    sl:         slN,
+    tp1:        tp1N,
+    tp2:        tp2N,
+    tp3:        tp3N,
+    entryTriggered:    true,
+    entryTime:         new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York", hour12: false, hour: "2-digit", minute: "2-digit" }),
+    entryTs:           Date.now(),
+    createdTs:         Date.now(),
+    metaApiDispatched: false,   // flipped to true below if dispatch succeeded
+    manualOperator:    req.user?.email ?? "unknown",
+  };
+
+  // Dispatch each leg via the bridge, recording per-leg success.
+  const legs = [];
+  try {
+    await cfNotifySignal(setup, market);
+    setup.metaApiDispatched = true;
+    if (tp1N != null) legs.push({ leg: "tp1", ok: true, tp: tp1N });
+    if (tp2N != null) legs.push({ leg: "tp2", ok: true, tp: tp2N });
+    if (tp3N != null) legs.push({ leg: "tp3", ok: true, tp: tp3N });
+  } catch (e) {
+    return res.status(502).json({ ok: false, error: `bridge dispatch failed: ${e.message}` });
+  }
+
+  // Append to setup_log so dashboard journal + history see the manual trade.
+  try {
+    const log = JSON.parse(readFileSync(SETUP_LOG_FILE_API, "utf8"));
+    log.unshift({
+      ...setup,
+      ts:        Date.now(),
+      datetime:  new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().replace("T", " ").slice(0, 16) + " ET",
+    });
+    writeFileSync(SETUP_LOG_FILE_API, JSON.stringify(log.slice(0, 10000), null, 2));
+  } catch (e) {
+    console.warn(`[/api/admin/manual-trade] setup_log append failed: ${e.message}`);
+  }
+
+  console.log(`[MANUAL-TRADE] ${req.user?.email ?? "?"} → ${market} ${direction} entry=${entryN} sl=${slN} tp1=${tp1N} tp2=${tp2N ?? "—"} tp3=${tp3N ?? "—"}`);
+  res.json({ ok: true, setupId, legs, entry: entryN, dispatched: setup.metaApiDispatched });
 });
 
 // ── Debug Log endpoint ─────────────────────────────────────────────────────────

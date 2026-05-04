@@ -331,7 +331,12 @@ function patchSetupLog(id, patch) {
   if (!id) return;
   const log = readJSON(SETUP_LOG_FILE, []);
   const item = log.find(e => e.id === id);
-  if (!item) return;
+  if (!item) {
+    // Silent no-op was hiding desync bugs (setup loaded ACTIVE from Mongo but
+    // never appended to setup_log → orphan path + reconcile both blind).
+    console.warn(`[patchSetupLog] id ${id} not in setup_log — patch dropped:`, JSON.stringify(patch));
+    return;
+  }
   Object.assign(item, patch);
   writeJSON(SETUP_LOG_FILE, log);
   mirrorSetupHistory(item); // fire-and-forget
@@ -2009,8 +2014,29 @@ async function fireEntryTrigger(marketKey, setup, opts = {}) {
     await saveSetup(marketKey, setup);
   }
 
-  // 5. MetaApi CopyFactory — fire-and-forget.
-  cfNotifySignal(setup, marketKey).catch(() => {});
+  // 5. MetaApi CopyFactory — awaited. The bridge now returns {ok, results}
+  //    where ok=true means EVERY leg was accepted. metaApiDispatched is only
+  //    flipped to true on full success — partial/failed dispatches stay flagged
+  //    so the recovery path keeps trying next tick (broker error, env outage,
+  //    network blip all become recoverable instead of silent losses).
+  try {
+    const dispatch = await cfNotifySignal(setup, marketKey);
+    if (dispatch?.ok) {
+      setup.metaApiDispatched = true;
+      if (persistActive) {
+        try { await saveSetup(marketKey, setup); } catch {}
+      }
+      patchSetupLog(setup.id, { metaApiDispatched: true });
+    } else {
+      const failed = (dispatch?.results ?? []).filter(r => !r.ok).map(r => `${r.leg}:${r.error ?? "?"}`).join(", ");
+      console.warn(`[fireEntryTrigger] partial/failed dispatch ${marketKey} ${setup.id} | failed=[${failed}] skipped=${dispatch?.skipped ?? "none"}`);
+      logEvent(marketKey, "METAAPI_DISPATCH_FAILED",
+        `${setup.direction} ${setup.id} | ${failed || dispatch?.skipped} — recovery will retry`,
+        "error");
+    }
+  } catch (e) {
+    console.warn(`[fireEntryTrigger] cfNotifySignal threw for ${marketKey} ${setup.id}: ${e.message}`);
+  }
 
   // 6. Discord trade-event — fire-and-forget.
   const fp = p => p > 100 ? Number(p).toFixed(1) : Number(p).toFixed(5);
@@ -2522,6 +2548,125 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   const currentPrice = candles[candles.length - 1]?.close ?? 0;
   const currentTime  = tsToETLabel(candles[candles.length - 1]?.timestamp ?? Date.now() / 1000);
   let activeSetup = await loadSetup(marketKey);
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // RECOVERY-PAD #1 — "Halverwege gestrand" detectie
+  // ────────────────────────────────────────────────────────────────────────────
+  // Symptoom dat dit ving op 04-05-2026: Mongo had US500/US30 als ACTIVE,
+  // maar geen MetaApi-signal en geen Discord "entry gevuld" message.
+  //
+  // Oorzaak: vorige tick mutateerde status=ACTIVE → schreef Mongo → werd
+  // gekild door 300s timeout vóórdat cfNotifySignal HTTP-call af was. Op de
+  // volgende tick zag de trigger-code entryTriggered:true → skipte → setup
+  // bleef permanent silent in de broker.
+  //
+  // Hoe deze fix werkt: bij elke tick checken we VOOR de trigger-code of er
+  // een setup is die ACTIVE staat maar nooit naar MetaApi is gegaan
+  // (metaApiDispatched is undefined/false). Zo ja → hervuren. CopyFactory
+  // gebruikt sha1(setupId:leg) als signalId — dezelfde input geeft dezelfde
+  // signalId, dus re-firen is idempotent (broker accepteert 't of geeft 'no
+  // change' terug, geen dubbele orders).
+  if (activeSetup && activeSetup.status === "ACTIVE" && activeSetup.entryTriggered && !activeSetup.metaApiDispatched && activeSetup.entry != null && activeSetup.sl != null) {
+    // Half-completed triggers can persist with tp3 (or even tp2) missing if
+    // the killed tick stopped after computing tp1 but before computeSweepTP
+    // finished. Recompute every leg from entry+sl using the canonical formula
+    // so the recovered dispatch always sends the full triplet.
+    if (activeSetup.tp1 == null || activeSetup.tp2 == null || activeSetup.tp3 == null) {
+      const tpRes = computeSweepTP(activeSetup.direction, activeSetup.entry, activeSetup.sl);
+      activeSetup.tp1 = activeSetup.tp1 ?? tpRes.tp1;
+      activeSetup.tp2 = activeSetup.tp2 ?? tpRes.tp2;
+      activeSetup.tp3 = activeSetup.tp3 ?? tpRes.tp3;
+      activeSetup.tp3Hit = activeSetup.tp3Hit ?? false;
+    }
+    console.warn(`[${marketKey}] METAAPI RECOVERY: ${activeSetup.id} ACTIVE without metaApiDispatched flag — re-firing signal`);
+    logEvent(marketKey, "METAAPI_RECOVERY",
+      `${activeSetup.direction} ${activeSetup.id} | entry=${activeSetup.entry} sl=${activeSetup.sl} — bootstrap dispatch`,
+      "recovery");
+    try {
+      const dispatch = await cfNotifySignal(activeSetup, marketKey);
+      if (dispatch?.ok) {
+        activeSetup.metaApiDispatched = true;
+        await saveSetup(marketKey, activeSetup);
+        patchSetupLog(activeSetup.id, {
+          metaApiDispatched: true,
+          tp1: activeSetup.tp1, tp2: activeSetup.tp2, tp3: activeSetup.tp3,
+        });
+        // Mirror the auto-engine's full ENTRY_TRIGGERED surface only when
+        // the broker actually accepted — otherwise we'd Discord-spam "entry
+        // gevuld" for trades that didn't land. Failed dispatch keeps the flag
+        // false → next tick recovery retries until ok.
+        logEvent(marketKey, "ENTRY_TRIGGERED",
+          `${activeSetup.direction} @ ${activeSetup.entry} (recovery) | SL: ${activeSetup.sl} | TP1: ${activeSetup.tp1}`,
+          "entry");
+        const fp = p => p > 100 ? Number(p).toFixed(1) : Number(p).toFixed(5);
+        sendDiscordTradeEvent(marketKey, "ENTRY_TRIGGERED",
+          `${activeSetup.direction} @ ${fp(activeSetup.entry)} (recovery) | SL: ${fp(activeSetup.sl)} | TP: ${fp(activeSetup.tp1)}`)
+          .catch(() => {});
+      } else {
+        const failed = (dispatch?.results ?? []).filter(r => !r.ok).map(r => `${r.leg}:${r.error ?? "?"}`).join(", ");
+        console.warn(`[${marketKey}] METAAPI RECOVERY partial/failed: ${failed || dispatch?.skipped} — will retry next tick`);
+        logEvent(marketKey, "METAAPI_DISPATCH_FAILED",
+          `${activeSetup.direction} ${activeSetup.id} (recovery) | ${failed || dispatch?.skipped} — retrying`,
+          "error");
+      }
+    } catch (e) {
+      console.warn(`[${marketKey}] METAAPI RECOVERY threw: ${e.message}`);
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // RECOVERY-PAD #2 — "Trigger heeft nooit gelopen" detectie (late-fire)
+  // ────────────────────────────────────────────────────────────────────────────
+  // Vangt het scenario waar de trigger NOOIT heeft gelopen voor een setup:
+  // - Cron-tick gemist op 02:45 ET (de minuut waarop entry candle drops)
+  // - MCP was offline tijdens het Phase 2 window
+  // - Phase 2 venster is inmiddels expired (>03:00 ET)
+  //
+  // Zonder dit pad: setup blijft eeuwig in WAITING_PHASE2 hangen, geen trade.
+  //
+  // Hoe het werkt: zoek de entry-candle exact op `entryWindowTs` (vast tijdstip
+  // bij setup-creatie). Als die candle bestaat in onze data EN minder dan 24u
+  // oud is, vuren we alsnog via fireEntryTrigger met de open-prijs van die
+  // candle als entry. Cap op 24u zodat een 3-dagen-oude setup niet ineens
+  // tegen de huidige market price gefired wordt.
+  if (activeSetup && activeSetup.status === "WAITING_PHASE2" && !activeSetup.entryTriggered && activeSetup.entryWindowTs && activeSetup.step2Ts) {
+    const entryCandle = candles.find(c => c.timestamp === activeSetup.entryWindowTs);
+    // Cap how stale the recovery can be — don't suddenly fire a 3-day-old setup
+    // at current market. 24h is generous (covers cron outages overnight) but
+    // keeps the entry economically meaningful.
+    const ageH = entryCandle ? (Date.now() / 1000 - entryCandle.timestamp) / 3600 : 0;
+    if (entryCandle && ageH < 24) {
+      console.warn(`[${marketKey}] LATE-FIRE RECOVERY: ${activeSetup.id} WAITING_PHASE2 with entryWindowTs ${ageH.toFixed(1)}h ago — firing now`);
+      const dec = entryCandle.open > 100 ? 1 : 5;
+      const actualEntry = +entryCandle.open.toFixed(dec);
+      const slPrice = computeSweepSL({
+        direction: activeSetup.direction,
+        candles,
+        step2Ts: activeSetup.step2Ts,
+        entryTs: entryCandle.timestamp,
+        entryPrice: actualEntry,
+        sweepPrice: activeSetup.sweepPrice,
+      });
+      const { tp1, tp2, tp3 } = computeSweepTP(activeSetup.direction, actualEntry, slPrice);
+      activeSetup.entry = actualEntry;
+      activeSetup.level = actualEntry;
+      activeSetup.sl    = slPrice;
+      activeSetup.tp1   = tp1;
+      activeSetup.tp2   = tp2;
+      activeSetup.tp3   = tp3;
+      activeSetup.tp3Hit = false;
+      activeSetup.slMovedToBE = false;
+      activeSetup.entryTriggered = true;
+      activeSetup.status = "ACTIVE";
+      activeSetup.entryTs = entryCandle.timestamp * 1000;
+      activeSetup.entryTime = tsToETLabel(entryCandle.timestamp);
+      try {
+        await fireEntryTrigger(marketKey, activeSetup, { sourceTag: `late-fire | ${ageH.toFixed(1)}h late` });
+      } catch (e) {
+        console.warn(`[${marketKey}] LATE-FIRE RECOVERY failed: ${e.message}`);
+      }
+    }
+  }
 
   // Validate and auto-correct setup state against actual candles
   if (activeSetup) {

@@ -374,6 +374,7 @@ function SignalCard({ label, sig, market, activeSetup, currentPrice, dailyEq = n
         if (!riskV) return null;
         const tp1V   = isBuy ? entryV + 1 * riskV : entryV - 1 * riskV;
         const tp2V   = isBuy ? entryV + 2 * riskV : entryV - 2 * riskV;
+        const tp3V   = isBuy ? entryV + 10 * riskV : entryV - 10 * riskV;
         const tpV    = tp1V;  // alias for existing refs below
         const pnlV   = isBuy ? price - entryV : entryV - price;
         const pnlRV  = pnlV / riskV;
@@ -398,6 +399,10 @@ function SignalCard({ label, sig, market, activeSetup, currentPrice, dailyEq = n
               <div className="ls-level-row ls-level-tp">
                 <span className="ls-lv-label">TP2 2R</span>
                 <span className="ls-lv-val">{fp(tp2V)}</span>
+              </div>
+              <div className="ls-level-row ls-level-tp">
+                <span className="ls-lv-label">TP3 10R</span>
+                <span className="ls-lv-val">{fp(tp3V)}</span>
               </div>
             </div>
             <div className="ls-progress">
