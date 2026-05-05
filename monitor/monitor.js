@@ -376,7 +376,7 @@ function verifyOrphanedActives(marketKey, candles, currentActiveId = null, daily
     if (item.market !== marketKey) continue;
     if (currentActiveId && item.id === currentActiveId) continue;  // handled by reconcileActiveSetup
     if (item.type === "scalp") continue;                           // scalps managed by processScalp
-    if (item.status !== "ACTIVE" && item.status !== "WAITING_PHASE2") continue;
+    if (item.status !== "ACTIVE" && item.status !== "WAITING_PHASE2" && item.status !== "TP2_HIT_RUNNING") continue;
 
     // ── (1) WAITING_PHASE2 → trigger entry retroactively if window passed ──
     if (item.status === "WAITING_PHASE2") {
@@ -422,41 +422,124 @@ function verifyOrphanedActives(marketKey, candles, currentActiveId = null, daily
       // fall through to outcome-verify below with the freshly-set fields
     }
 
-    // ── (2) ACTIVE → verify SL/TP outcome against post-entry candles ──
+    // ── (2) ACTIVE / TP2_HIT_RUNNING → step the state machine vs post-entry candles ──
+    // Mirrors the live-path logic at the "Active trade monitoring" block so an
+    // orphan that fell out of the active-slot still gets the runner/BE flow:
+    //   SL pre-runner  → CLOSED_SL, cancel all legs (loss)
+    //   SL post-runner → CLOSED_TP2 + runnerOutcome:BE_STOP, cancel tp3 (win @ 2R)
+    //   TP1            → tp1Hit=true, cancel tp1 leg, stay ACTIVE
+    //   TP2 (has tp3)  → TP2_HIT_RUNNING, sl=entry, slMovedToBE=true,
+    //                    cancel tp2 leg, modify tp3 leg's SL to entry
+    //   TP2 (no  tp3)  → CLOSED_TP2 legacy, cancel all legs
+    //   TP3 (runner)   → CLOSED_TP3, rMulti=10, cancel tp3 leg
     if (!item.entryTs || item.sl == null || item.tp1 == null) continue;
     const entryTsSec = item.entryTs > 1e12 ? item.entryTs / 1000 : item.entryTs;
-    const result = verifyOutcome({
-      direction: item.direction,
-      candles,
-      entryTs:   entryTsSec,
-      entry:     item.entry,
-      sl:        item.sl,
-      tp1:       item.tp1,
-      tp2:       item.tp2,
-    });
-    if (!result.outcome) {
-      if (dirty) mirrorSetupHistory(item);  // still open; mirror the trigger update
+    const isBuy = item.direction === "BUY";
+    const post  = candles
+      .filter(c => c.timestamp > entryTsSec)
+      .sort((a, b) => a.timestamp - b.timestamp);
+    if (!post.length) {
+      if (dirty) mirrorSetupHistory(item);
       continue;
     }
+    const fp = p => p > 100 ? p.toFixed(1) : p.toFixed(5);
+    let changed = false;
 
-    if (result.outcome === "LOSS") {
-      item.status      = "CLOSED_SL";
-      item.outcome     = "LOSS";
-      item.slHit       = true;
-      item.outcomeTime = item.outcomeTime ?? tsToETDateTime(result.hitTs);
-      item.outcomePrice = item.outcomePrice ?? result.hitPrice;
-    } else if (result.outcome === "WIN") {
-      item.status      = "CLOSED_TP2";
-      item.outcome     = "WIN";
-      item.tp1Hit      = true;
-      item.tp2Hit      = result.rMulti === 2;
-      item.outcomeTime = item.outcomeTime ?? tsToETDateTime(result.hitTs);
-      item.outcomePrice = item.outcomePrice ?? result.hitPrice;
+    for (const c of post) {
+      const isRunner  = item.status === "TP2_HIT_RUNNING";
+      const slBroken  = isBuy ? c.low  <= item.sl  : c.high >= item.sl;
+      const tp1Broken = item.tp1 != null && (isBuy ? c.high >= item.tp1 : c.low  <= item.tp1);
+      const tp2Broken = item.tp2 != null && (isBuy ? c.high >= item.tp2 : c.low  <= item.tp2);
+      const tp3Broken = item.tp3 != null && (isBuy ? c.high >= item.tp3 : c.low  <= item.tp3);
+
+      if (slBroken && !item.slHit) {
+        item.slHit = true;
+        if (isRunner) {
+          item.status        = "CLOSED_TP2";
+          item.runnerOutcome = "BE_STOP";
+          item.outcomeTime   = item.outcomeTime  ?? tsToETDateTime(c.timestamp);
+          item.outcomePrice  = item.outcomePrice ?? item.sl;
+          logEvent(marketKey, "RUNNER_BE_STOP",
+            `${item.direction} runner stopped at BE @ ${fp(item.sl)} (TP2 already hit) [orphan]`,
+            "tp2_hit");
+          cfCancelSignal(item, "tp3").catch(() => {});
+        } else {
+          item.status        = "CLOSED_SL";
+          item.outcome       = "LOSS";
+          item.outcomeTime   = item.outcomeTime  ?? tsToETDateTime(c.timestamp);
+          item.outcomePrice  = item.outcomePrice ?? item.sl;
+          logEvent(marketKey, "SL_HIT",
+            `${item.direction} SL @ ${fp(item.sl)} | Entry was ${fp(item.entry)} [orphan]`,
+            "sl_hit");
+          cfCancelSignal(item, "all").catch(() => {});
+        }
+        changed = true;
+        break;
+      }
+
+      if (!isRunner && tp1Broken && !item.tp1Hit) {
+        item.tp1Hit     = true;
+        item.tp1HitTime = item.tp1HitTime ?? tsToETDateTime(c.timestamp);
+        logEvent(marketKey, "TP1_HIT",
+          `${item.direction} TP1 @ ${fp(item.tp1)} ✅ (1R) [orphan]`, "tp1_hit");
+        cfCancelSignal(item, "tp1").catch(() => {});
+        changed = true;
+        // fall through — TP2 / SL may still fire on later candles
+      }
+
+      if (!isRunner && tp2Broken && !item.tp2Hit) {
+        item.tp2Hit     = true;
+        item.tp2HitTime = item.tp2HitTime ?? tsToETDateTime(c.timestamp);
+        const hasRunner = item.tp3 != null && !item.slMovedToBE;
+        if (hasRunner) {
+          const beSL       = item.entry;
+          item.sl          = beSL;
+          item.slMovedToBE = true;
+          item.status      = "TP2_HIT_RUNNING";
+          logEvent(marketKey, "TP2_HIT",
+            `${item.direction} TP2 @ ${fp(item.tp2)} 🏆 (2R) — runner armed, SL→BE ${fp(beSL)} [orphan]`,
+            "tp2_hit");
+          cfCancelSignal(item, "tp2").catch(() => {});
+          cfModifySignalSL(item, marketKey, "tp3", beSL).catch(() => {});
+          changed = true;
+          // fall through — TP3 / BE-SL may still fire on later candles in this scan
+        } else {
+          item.status        = "CLOSED_TP2";
+          item.outcome       = "WIN";
+          item.outcomeTime   = item.outcomeTime  ?? tsToETDateTime(c.timestamp);
+          item.outcomePrice  = item.outcomePrice ?? item.tp2;
+          logEvent(marketKey, "TP2_HIT",
+            `${item.direction} TP2 @ ${fp(item.tp2)} 🏆 (2R) [orphan, no runner]`,
+            "tp2_hit");
+          cfCancelSignal(item, "all").catch(() => {});
+          changed = true;
+          break;
+        }
+      }
+
+      if (item.status === "TP2_HIT_RUNNING" && tp3Broken && !item.tp3Hit) {
+        item.tp3Hit       = true;
+        item.tp3HitTime   = item.tp3HitTime ?? tsToETDateTime(c.timestamp);
+        item.status       = "CLOSED_TP3";
+        item.outcome      = "WIN";
+        item.rMulti       = 10;
+        item.outcomeTime  = item.outcomeTime  ?? tsToETDateTime(c.timestamp);
+        item.outcomePrice = item.outcomePrice ?? item.tp3;
+        logEvent(marketKey, "TP3_HIT",
+          `${item.direction} TP3 @ ${fp(item.tp3)} 🚀 (10R runner) [orphan]`, "tp3_hit");
+        cfCancelSignal(item, "tp3").catch(() => {});
+        changed = true;
+        break;
+      }
     }
-    console.log(`[${marketKey}] ORPHAN VERIFY: ${item.id} → ${item.status} (${item.outcome})`);
-    mirrorSetupHistory(item);
-    cfCancelSignal(item, "all").catch(() => {});
-    dirty = true;
+
+    if (changed) {
+      console.log(`[${marketKey}] ORPHAN VERIFY: ${item.id} → ${item.status}`);
+      mirrorSetupHistory(item);
+      dirty = true;
+    } else if (dirty) {
+      mirrorSetupHistory(item);
+    }
   }
   if (dirty) writeJSON(SETUP_LOG_FILE, log);
 }

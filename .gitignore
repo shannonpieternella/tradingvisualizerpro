@@ -37,6 +37,7 @@ monitor/setup_log*.json
 monitor/card_state_*.json
 monitor/sweep_state_*.json
 monitor/trade_history_*.json
+monitor/scalp_*.json
 monitor/signal_history.json
 monitor/signal_state.json
 monitor/debug_log.json
