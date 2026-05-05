@@ -9,9 +9,12 @@ const DIRECTIONS = ["", "BUY", "SELL"];
 const OUTCOMES   = ["", "WIN", "LOSS"];
 const TFS        = ["", "daily", "6H", "90min"];
 const DOW_LABELS = ["Zondag", "Maandag", "Dinsdag", "Woensdag", "Donderdag", "Vrijdag", "Zaterdag"];
-// Lock alignment is hard-pinned to "with" on this page — only met-lock setups
-// are journalled here, and the user does not want a UI choice for it.
-const FORCED_LOCK = "with";
+const LOCK_OPTIONS = [
+  { v: "",        label: "Alle" },
+  { v: "with",    label: "🔒 Met lock" },
+  { v: "against", label: "⚠ Tegen lock" },
+  { v: "none",    label: "○ Geen lock" },
+];
 
 function fmtPrice(p, market) {
   if (p == null) return "—";
@@ -200,7 +203,7 @@ function TradeCard({ s }) {
 export default function JournalPage() {
   const { authFetch, user } = useAuth();
   const [filters, setFilters] = useState({
-    market: "", direction: "", tf: "", outcome: "", entryWindow: "", day: "", from: "", to: "",
+    market: "", direction: "", tf: "", outcome: "", entryWindow: "", day: "", from: "", to: "", lockAlignment: "",
   });
   const [items, setItems]   = useState([]);
   const [total, setTotal]   = useState(0);
@@ -212,7 +215,6 @@ export default function JournalPage() {
   const qs = useMemo(() => {
     const p = new URLSearchParams();
     for (const [k, v] of Object.entries(filters)) { if (v !== "" && v != null) p.set(k, v); }
-    p.set("lockAlignment", FORCED_LOCK);
     return p.toString();
   }, [filters]);
 
@@ -246,7 +248,7 @@ export default function JournalPage() {
   }
   function reset() {
     setOffset(0);
-    setFilters({ market: "", direction: "", tf: "", outcome: "", entryWindow: "", day: "", from: "", to: "" });
+    setFilters({ market: "", direction: "", tf: "", outcome: "", entryWindow: "", day: "", from: "", to: "", lockAlignment: "" });
   }
 
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -295,6 +297,12 @@ export default function JournalPage() {
           <span>Outcome</span>
           <select value={filters.outcome} onChange={e => updateFilter("outcome", e.target.value)}>
             {OUTCOMES.map(o => <option key={o} value={o}>{o || "Alle"}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>Lock</span>
+          <select value={filters.lockAlignment} onChange={e => updateFilter("lockAlignment", e.target.value)}>
+            {LOCK_OPTIONS.map(o => <option key={o.v} value={o.v}>{o.label}</option>)}
           </select>
         </label>
         <label>
