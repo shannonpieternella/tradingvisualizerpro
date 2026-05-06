@@ -3458,7 +3458,28 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
         `${direction} | ${tf} new sweep — blocked by live ${activeSetup.tf} ${activeSetup.status} setup`,
         "skipped");
     }
-    if (validSweepPattern && !liveSetupExists) {
+
+    // Cross-TF same-window dedup: if ANOTHER TF already has a setup pointing
+    // at the same entryWindowTs (= same entry candle), don't create a duplicate
+    // here. Two setups firing at the same entry-time = two near-identical
+    // orders, doubling broker exposure for no extra alpha. Different windows
+    // (e.g. 6H 14:45 + 90M 02:45) keep both — those are genuinely separate trades.
+    const sameWindowConflict = entryWindowTs && Object.entries(allTfSetups).some(([otherTf, s]) => {
+      if (!s || otherTf === _currentTf) return false;
+      // Only block against setups still active or pre-entry — closed setups don't conflict.
+      const isLiveOrWaiting = s.status === "WAITING_PHASE2"
+                           || s.status === "ACTIVE"
+                           || s.status === "TP2_HIT_RUNNING";
+      return isLiveOrWaiting && s.entryWindowTs === entryWindowTs;
+    });
+    if (validSweepPattern && !liveSetupExists && sameWindowConflict) {
+      const conflictTf = Object.entries(allTfSetups).find(([otf, s]) =>
+        s && otf !== _currentTf && s.entryWindowTs === entryWindowTs)?.[0];
+      logEvent(marketKey, "SETUP_BLOCKED",
+        `${direction} | ${tf} skipped — ${conflictTf} already has setup for entry-window ${nextPhase2Label}`,
+        "skipped");
+    }
+    if (validSweepPattern && !liveSetupExists && !sameWindowConflict) {
     const setupId = `${marketKey}-${tfSrc}-${Date.now()}`;
     const setup = {
       id:              setupId,
