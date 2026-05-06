@@ -452,7 +452,12 @@ function verifyOrphanedActives(marketKey, candles, currentActiveId = null, daily
 
     for (const c of post) {
       const isRunner  = item.status === "TP2_HIT_RUNNING";
-      const slBroken  = isBuy ? c.low  <= item.sl  : c.high >= item.sl;
+      // For runner state: only count SL hit on candles AFTER the BE-MOVE
+      // moment. Pre-BE candles often touched entry naturally — those aren't
+      // post-TP2 reversals and shouldn't close the runner.
+      const beTsSec = item.slMovedToBETs ? item.slMovedToBETs / 1000 : 0;
+      const slEligible = !isRunner || c.timestamp > beTsSec;
+      const slBroken  = slEligible && (isBuy ? c.low  <= item.sl  : c.high >= item.sl);
       const tp1Broken = item.tp1 != null && (isBuy ? c.high >= item.tp1 : c.low  <= item.tp1);
       const tp2Broken = item.tp2 != null && (isBuy ? c.high >= item.tp2 : c.low  <= item.tp2);
       const tp3Broken = item.tp3 != null && (isBuy ? c.high >= item.tp3 : c.low  <= item.tp3);
@@ -497,10 +502,11 @@ function verifyOrphanedActives(marketKey, candles, currentActiveId = null, daily
         item.tp2HitTime = item.tp2HitTime ?? tsToETDateTime(c.timestamp);
         const hasRunner = item.tp3 != null && !item.slMovedToBE;
         if (hasRunner) {
-          const beSL       = item.entry;
-          item.sl          = beSL;
-          item.slMovedToBE = true;
-          item.status      = "TP2_HIT_RUNNING";
+          const beSL          = item.entry;
+          item.sl             = beSL;
+          item.slMovedToBE    = true;
+          item.slMovedToBETs  = c.timestamp * 1000;   // anchor for SL check post-runner
+          item.status         = "TP2_HIT_RUNNING";
           logEvent(marketKey, "TP2_HIT",
             `${item.direction} TP2 @ ${fp(item.tp2)} 🏆 (2R) — runner armed, SL→BE ${fp(beSL)} [orphan]`,
             "tp2_hit");
@@ -3654,10 +3660,19 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
 
     // Check SL (current sl reflects entry once slMovedToBE). Discord +
     // MetaApi side-effects unified in fireTradeEvent.
+    //
+    // CRITICAL: when isRunner, only consider candles AFTER the BE-MOVE moment.
+    // Looking at all post-entry candles would falsely trigger BE-STOP on
+    // historical candles whose lows happen to be at/below entry — those touched
+    // entry during the natural price action BEFORE TP2 was hit, not as a real
+    // post-TP2 reversal.
     if (!activeSetup.slHit) {
+      const entryTsSec = (activeSetup.entryTs ?? 0) / 1000;
+      const beTsSec    = (activeSetup.slMovedToBETs ?? 0) / 1000;
+      const sinceTs    = isRunner && beTsSec > 0 ? beTsSec : entryTsSec;
       const slHit = direction === "BUY"
-        ? candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.low  <= sl)
-        : candles.some(c => c.timestamp > (activeSetup.entryTs ?? 0) / 1000 && c.high >= sl);
+        ? candles.some(c => c.timestamp > sinceTs && c.low  <= sl)
+        : candles.some(c => c.timestamp > sinceTs && c.high >= sl);
       if (slHit) {
         activeSetup.slHit = true;
         if (isRunner) {
@@ -3698,6 +3713,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
           const beSL = activeSetup.entry;
           activeSetup.sl = beSL;
           activeSetup.slMovedToBE = true;
+          activeSetup.slMovedToBETs = Date.now();   // anchor for SL check post-runner
           activeSetup.status = "TP2_HIT_RUNNING";
           await fireTradeEvent(marketKey, activeSetup, "TP2_HIT_RUNNER", { beSL });
         } else {
