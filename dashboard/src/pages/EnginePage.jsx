@@ -77,7 +77,7 @@ export default function EnginePage() {
       <div className="eng-header">
         <div className="eng-header-left">
           <span className="eng-dot" />
-          <span className="eng-title">BLACKBULL · Liquidity Engine</span>
+          <span className="eng-title">TradingVisualizer · Liquidity Engine</span>
         </div>
         <div className="eng-tabs">
           {[["structure","📊 Structure"],["lock","🔒 Lock & Bias"],["console","📋 Console"]].map(([t,l]) => (

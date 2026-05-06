@@ -10,6 +10,8 @@ import EnginePage  from "./pages/EnginePage.jsx";
 import JournalPage from "./pages/JournalPage.jsx";
 import TradeReplayPage from "./pages/TradeReplayPage.jsx";
 import BrokerPage  from "./pages/BrokerPage.jsx";
+import BillingPage from "./pages/BillingPage.jsx";
+import ProfilePage from "./pages/ProfilePage.jsx";
 
 // Protected route: redirect to /login if not authenticated
 function PrivateRoute({ children }) {
@@ -58,6 +60,12 @@ export default function App() {
         } />
         <Route path="/broker" element={
           <PrivateRoute><BrokerPage /></PrivateRoute>
+        } />
+        <Route path="/billing" element={
+          <PrivateRoute><BillingPage /></PrivateRoute>
+        } />
+        <Route path="/profile" element={
+          <PrivateRoute><ProfilePage /></PrivateRoute>
         } />
         {/* Catch-all */}
         <Route path="*" element={<Navigate to="/" replace />} />

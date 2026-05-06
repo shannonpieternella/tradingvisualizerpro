@@ -8,6 +8,7 @@ export function LiveDataProvider({ children }) {
   const { authFetch } = useAuth();
   const [markets, setMarkets]       = useState({});
   const [adminBias, setAdminBias]   = useState({ GLOBAL: "AUTO" });
+  const [freeTier, setFreeTier]     = useState(null);
   const [lastRefresh, setLastRefresh] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError]           = useState(null);
@@ -22,6 +23,7 @@ export function LiveDataProvider({ children }) {
       ]);
       if (liveRes.ok) {
         setMarkets(liveRes.markets ?? {});
+        setFreeTier(liveRes.freeTier ?? null);
         setLastRefresh(new Date());
         setError(null);
       } else if (liveRes.error) {
@@ -48,7 +50,7 @@ export function LiveDataProvider({ children }) {
     return () => clearInterval(iv);
   }, [load]);
 
-  const value = { markets, adminBias, lastRefresh, refreshing, error, refresh, refreshKey };
+  const value = { markets, adminBias, freeTier, lastRefresh, refreshing, error, refresh, refreshKey };
   return <LiveDataContext.Provider value={value}>{children}</LiveDataContext.Provider>;
 }
 

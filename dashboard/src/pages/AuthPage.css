@@ -241,3 +241,102 @@
   .auth-card    { padding: 28px 20px 24px; }
   .auth-back    { top: 12px; left: 12px; font-size: 12px; padding: 6px 10px; }
 }
+
+/* Plan-keuze blok bij registratie */
+.auth-tier-block { margin: 18px 0 4px; }
+.auth-tiers { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px; }
+.auth-tiers.auth-tiers-3 { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 640px) { .auth-tiers.auth-tiers-3 { grid-template-columns: 1fr; } }
+.auth-tier {
+  text-align: left; padding: 14px 14px 12px;
+  background: rgba(255,255,255,0.03);
+  border: 1.5px solid #1a2332;
+  border-radius: 8px; cursor: pointer;
+  color: #c9d3e3; transition: all 0.15s;
+}
+.auth-tier:hover { background: rgba(255,255,255,0.06); }
+.auth-tier-active {
+  background: rgba(74,222,128,0.10);
+  border-color: rgba(74,222,128,0.6);
+}
+.auth-tier-name { font-size: 13px; font-weight: 700; }
+.auth-tier-price { font-size: 22px; font-weight: 800; color: #4ade80; margin: 4px 0 6px; }
+.auth-tier-int { font-size: 12px; font-weight: 500; color: #9ca3af; }
+.auth-tier-desc { font-size: 11px; color: #9ca3af; line-height: 1.4; }
+.auth-tier-note {
+  margin-top: 10px; padding: 8px 12px;
+  background: rgba(96,165,250,0.10);
+  border: 1px solid rgba(96,165,250,0.3);
+  border-radius: 6px; color: #60a5fa;
+  font-size: 12px;
+}
+@media (max-width: 480px) {
+  .auth-tiers { grid-template-columns: 1fr; }
+}
+
+/* New register form additions */
+.auth-optional { font-size: 11px; color: #6b7280; font-weight: 400; }
+.auth-trust {
+  text-align: center; font-size: 12px; color: #6b7280;
+  margin: 12px 0 0;
+}
+.auth-tier-confirm {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 16px;
+  background: linear-gradient(135deg, rgba(74,222,128,0.08), rgba(96,165,250,0.08));
+  border: 1px solid rgba(74,222,128,0.4);
+  border-radius: 10px;
+  margin: 14px 0 6px;
+}
+.auth-tier-confirm-icon { font-size: 28px; flex-shrink: 0; }
+.auth-tier-confirm-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.auth-tier-confirm-text strong { font-size: 14px; color: #c9d3e3; }
+.auth-tier-confirm-text span { font-size: 11px; color: #9ca3af; }
+.auth-tier-switch {
+  background: transparent; border: none;
+  color: #60a5fa; font-size: 11px; cursor: pointer;
+  text-decoration: underline; padding: 0;
+}
+.auth-tier-switch:hover { color: #93c5fd; }
+
+/* Language switch — fixed top-right corner of auth page */
+.auth-lang-corner {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  z-index: 10;
+}
+
+/* Tier picker — stack vertically on auth page (3 cols was too cramped at 420px card width) */
+.auth-tiers.auth-tiers-3 {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+.auth-tier {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  column-gap: 12px;
+  row-gap: 4px;
+  align-items: baseline;
+  padding: 12px 14px;
+}
+.auth-tier-name { grid-column: 1; grid-row: 1; font-size: 13px; }
+.auth-tier-price {
+  grid-column: 2; grid-row: 1;
+  font-size: 18px;
+  margin: 0;
+  white-space: nowrap;
+}
+.auth-tier-int { font-size: 11px; }
+.auth-tier-desc {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  font-size: 11px;
+  margin: 0;
+  color: #9ca3af;
+}
+
+@media (max-width: 480px) {
+  .auth-lang-corner { top: 12px; right: 12px; }
+}
