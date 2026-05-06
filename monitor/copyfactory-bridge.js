@@ -76,6 +76,29 @@ async function reqCopyFactory(path, method, body) {
   } finally { clearTimeout(t); }
 }
 
+// Per-TF magic offsets so parallel setups on the same market+direction don't
+// net at the broker. Broker nets when (symbol, direction, magic) all match,
+// merging volume and honoring only one TP. By giving each TF a unique magic
+// base, a 6H BUY + 90M BUY on the same symbol stay as separate positions.
+//   6H:        magic 1 / 2 / 3   (offset 0)  — primary, kept stable for legacy
+//   90min:     magic 11 / 12 / 13 (offset 10)
+//   daily:     magic 21 / 22 / 23 (offset 20)
+//   22.5min:   magic 31 / 32 / 33 (scalp)
+//   5.625min:  magic 41 / 42 / 43 (scalp)
+const TF_MAGIC_OFFSET = {
+  "6H":       0,
+  "90min":   10,
+  "daily":   20,
+  "22.5min": 30,
+  "5.625min": 40,
+};
+
+function magicFor(tf, leg) {
+  const base = leg === "tp3" ? 3 : leg === "tp2" ? 2 : 1;
+  const offset = TF_MAGIC_OFFSET[tf] ?? 0;
+  return base + offset;
+}
+
 // Build one leg of the split-position triplet (tp1 / tp2 / tp3-runner).
 function buildLegPayload(setup, marketKey, leg) {
   const isBuy = setup.direction === "BUY";
@@ -95,9 +118,9 @@ function buildLegPayload(setup, marketKey, leg) {
     time:    new Date().toISOString(),
     ...(setup.sl != null ? { stopLoss:   setup.sl } : {}),
     ...(tp       != null ? { takeProfit: tp       } : {}),
-    // Distinct magic per leg — same symbol+direction+magic causes the broker
-    // to net signals into one position, so only one TP gets honored.
-    magic:   leg === "tp3" ? 3 : leg === "tp2" ? 2 : 1,
+    // Per-TF magic: prevents same-symbol+direction parallel setups on
+    // different timeframes from netting into one merged broker position.
+    magic:   magicFor(setup.tf, leg),
   };
   return { signalId: toSignalId(setup.id, leg), body };
 }
@@ -137,6 +160,17 @@ async function sendOneLeg(setup, marketKey, leg) {
   }
 }
 
+// Global pause: when system_state.json has paused:true, ALL outbound signals
+// (notifySignal + modifySignalSL) are skipped. Toggled from the admin
+// dashboard. Read on every dispatch — cheap and reflects flips immediately.
+const SYSTEM_STATE_FILE = join(__dir, "system_state.json");
+function isPaused() {
+  try {
+    const raw = readFileSync(SYSTEM_STATE_FILE, "utf8");
+    return JSON.parse(raw)?.paused === true;
+  } catch { return false; }
+}
+
 // Send all configured legs (TP1 + TP2 + optional TP3 runner). Returns an
 // aggregate { ok, results } where ok=true only if EVERY configured leg was
 // accepted by the broker. Caller (fireEntryTrigger / recovery) flips
@@ -144,6 +178,10 @@ async function sendOneLeg(setup, marketKey, leg) {
 // re-firing on the next tick instead of silently giving up.
 export async function notifySignal(setup, marketKey) {
   if (!setup?.id || setup.status !== "ACTIVE") return { ok: false, results: [], skipped: "not-active" };
+  if (isPaused()) {
+    logLine(`PAUSED (system) — skip ${marketKey} ${setup.direction} ${setup.id}`);
+    return { ok: false, results: [], skipped: "system-paused" };
+  }
   if (!TOKEN || !STRATEGY_ID) {
     logLine(`SKIP (env missing) — market=${marketKey} setup=${setup.id}`);
     return { ok: false, results: [], skipped: "env-missing" };
@@ -162,6 +200,10 @@ export async function notifySignal(setup, marketKey) {
 // running position's stopLoss to the new value.
 export async function modifySignalSL(setup, marketKey, leg, newSL) {
   if (!setup?.id || !TOKEN || !STRATEGY_ID) return;
+  if (isPaused()) {
+    logLine(`PAUSED (system) — skip modify-SL ${marketKey} ${leg.toUpperCase()}`);
+    return;
+  }
   const { signalId, body } = buildLegPayload(setup, marketKey, leg);
   body.stopLoss = newSL;
   body.time     = new Date().toISOString();   // refresh — old time would expire

@@ -56,3 +56,8 @@ monitor/api.log
 /tmp/
 *.tmp
 *.lock
+
+# Added in billing/i18n session
+monitor/system_state.json
+monitor/manual_fire_*.mjs
+monitor/manual_cancel_*.mjs

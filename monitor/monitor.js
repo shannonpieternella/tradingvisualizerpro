@@ -370,11 +370,16 @@ function updateSetupLogOutcome(id, outcome, extra = {}) {
 //   2. ACTIVE → run verifyOutcome to detect SL/TP hits.
 function verifyOrphanedActives(marketKey, candles, currentActiveId = null, dailyEq = null, sixHEq = null) {
   if (!candles?.length) return;
+  // Multi-setup support: caller may pass a single id (legacy) or an array of
+  // ids (one per TF). All matching ids are considered "current" and skipped.
+  const currentIds = currentActiveId == null ? []
+                   : Array.isArray(currentActiveId) ? currentActiveId
+                   : [currentActiveId];
   const log = readJSON(SETUP_LOG_FILE, []);
   let dirty = false;
   for (const item of log) {
     if (item.market !== marketKey) continue;
-    if (currentActiveId && item.id === currentActiveId) continue;  // handled by reconcileActiveSetup
+    if (currentIds.includes(item.id)) continue;  // handled by reconcileActiveSetup per TF
     if (item.type === "scalp") continue;                           // scalps managed by processScalp
     if (item.status !== "ACTIVE" && item.status !== "WAITING_PHASE2" && item.status !== "TP2_HIT_RUNNING") continue;
 
@@ -1281,6 +1286,34 @@ function getRef90MinCycle(cycles90, dir) {
     .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
   if (!arr.length) return null;
   const completed = [...arr].filter(c => c.complete).reverse(); // most recent first
+
+  // Cross-cycle sweep: when step-1 is hit in cycle N and step-2 is then swept
+  // in cycle N+1, allow a synthetic ref that pairs them — mirrors the
+  // getRef6HCycle behavior at line ~1332. Without this, 90M only ever sees
+  // same-cycle high+low pairs and silently drops legit cross-cycle setups
+  // (e.g. BSL hit at 23:15 in cycle 21:00, SSL swept at 01:30 in cycle 00:00).
+  if (completed.length >= 2 && dir) {
+    const isBuy      = dir === "BUY";
+    const mostRecent = completed[0];
+    const step1Cycle = completed.find(c =>
+      isBuy ? c.hitHigh != null : c.hitLow != null
+    );
+    if (step1Cycle && step1Cycle !== mostRecent) {
+      // Check that step-2 is actually swept in the more recent cycle (otherwise
+      // there's no real pattern yet — fall through to findBestCandleRef).
+      const step2Hit = isBuy ? mostRecent.hitLow : mostRecent.hitHigh;
+      if (step2Hit) {
+        return {
+          ...mostRecent,
+          high:    isBuy ? step1Cycle.high  : mostRecent.high,
+          low:     isBuy ? mostRecent.low   : step1Cycle.low,
+          hitHigh: isBuy ? step1Cycle.hitHigh : mostRecent.hitHigh,
+          hitLow:  isBuy ? mostRecent.hitLow  : step1Cycle.hitLow,
+        };
+      }
+    }
+  }
+
   if (completed.length) {
     const best = findBestCandleRef(completed, dir);
     if (best) return best;
@@ -1467,46 +1500,90 @@ function calcTP(direction, entry, sl) {
   }
 }
 
-// ── Setup State ───────────────────────────────────────────────────────────────
-// MongoDB is primary (survives reboots). Local JSON file is always written too
-// as an instant fallback when MongoDB is unavailable.
-function setupFilePath(marketKey) {
-  return join(__dir, `setup_${marketKey}.json`);
+// ── Setup State (per-TF file slots) ──────────────────────────────────────────
+// One file per (market × tf). Lets a market run a 6H + 90M + daily setup in
+// parallel with independent lifecycle. Backward compat: if no per-TF file
+// exists, fall back to legacy `setup_<MK>.json` (one shot — saveSetup migrates).
+//
+// MongoDB `active_setups` uses composite _id `${market}_${tf}` so per-TF docs
+// don't overwrite each other. Legacy `_id: marketKey` docs still loadable.
+const PRIMARY_TFS = ["6H", "90min", "daily"];
+
+function setupFilePath(marketKey, tf = null) {
+  if (tf) return join(__dir, `setup_${marketKey}_${tf}.json`);
+  return join(__dir, `setup_${marketKey}.json`); // legacy
 }
 
-async function loadSetup(marketKey) {
+function setupMongoId(marketKey, tf = null) {
+  return tf ? `${marketKey}_${tf}` : marketKey;
+}
+
+async function loadSetup(marketKey, tf = null) {
   const db = await getDB();
+  // With tf: load per-TF, with legacy fallback if its content has matching tf.
+  if (tf) {
+    if (db) {
+      try {
+        const doc = await db.collection("active_setups").findOne({ _id: setupMongoId(marketKey, tf) });
+        if (doc) { const { _id, ...setup } = doc; return setup; }
+        // Per-TF doc absent — try legacy doc (might hold a setup of THIS tf).
+        const legacyDoc = await db.collection("active_setups").findOne({ _id: marketKey });
+        if (legacyDoc && legacyDoc.tf === tf) {
+          const { _id, ...setup } = legacyDoc;
+          return setup;
+        }
+      } catch (e) { console.warn(`[MongoDB] loadSetup: ${e.message}`); }
+    }
+    // File fallback: per-TF file, then legacy if its tf matches.
+    const perTf = readJSON(setupFilePath(marketKey, tf), null);
+    if (perTf) return perTf;
+    const legacy = readJSON(setupFilePath(marketKey), null);
+    if (legacy && legacy.tf === tf) return legacy;
+    return null;
+  }
+  // No tf passed (legacy callers like processScalp) — return legacy single setup.
   if (db) {
     try {
       const doc = await db.collection("active_setups").findOne({ _id: marketKey });
-      if (doc) {
-        const { _id, ...setup } = doc;
-        return setup;
-      }
-      // Not in MongoDB yet — load from local file and sync immediately
-      const local = readJSON(setupFilePath(marketKey), null);
-      if (local) {
-        await db.collection("active_setups").replaceOne(
-          { _id: marketKey }, { _id: marketKey, ...local }, { upsert: true }
-        );
-        console.log(`[MongoDB] Synced ${marketKey} setup to MongoDB`);
-      }
-      return local;
+      if (doc) { const { _id, ...setup } = doc; return setup; }
     } catch (e) { console.warn(`[MongoDB] loadSetup: ${e.message}`); }
   }
   return readJSON(setupFilePath(marketKey), null);
 }
 
+// Returns a map { "6H": setup|null, "90min": setup|null, "daily": setup|null }
+async function loadAllSetups(marketKey) {
+  const out = {};
+  for (const tf of PRIMARY_TFS) out[tf] = await loadSetup(marketKey, tf);
+  return out;
+}
+
 async function saveSetup(marketKey, setup) {
-  writeJSON(setupFilePath(marketKey), setup);
+  const tf = setup?.tf;
+  writeJSON(setupFilePath(marketKey, tf), setup);
+  // Migration: if legacy file holds the same setup id, delete it so we don't
+  // double-track. clearSetup() handles legacy as a fallback.
+  try {
+    const legacy = readJSON(setupFilePath(marketKey), null);
+    if (legacy && legacy.id === setup.id && tf) {
+      try { unlinkSync(setupFilePath(marketKey)); } catch {}
+    }
+  } catch {}
   const db = await getDB();
   if (db) {
     try {
       await db.collection("active_setups").replaceOne(
-        { _id: marketKey },
-        { _id: marketKey, ...setup },
+        { _id: setupMongoId(marketKey, tf) },
+        { _id: setupMongoId(marketKey, tf), ...setup },
         { upsert: true }
       );
+      // Clean legacy Mongo doc if it held this same setup id
+      if (tf) {
+        const legacyDoc = await db.collection("active_setups").findOne({ _id: marketKey });
+        if (legacyDoc && legacyDoc.id === setup.id) {
+          await db.collection("active_setups").deleteOne({ _id: marketKey });
+        }
+      }
     } catch (e) { console.warn(`[MongoDB] saveSetup: ${e.message}`); }
   }
 }
@@ -1529,10 +1606,16 @@ async function clearScalp(marketKey, tf) {
 }
 
 async function clearSetup(marketKey, setup = null, reason = null) {
-  try { unlinkSync(setupFilePath(marketKey)); } catch {}
+  // Per-TF aware: when setup has tf, delete that TF's file + Mongo doc.
+  // Legacy callers (no setup arg) still wipe the legacy file/doc.
+  const tf = setup?.tf ?? null;
+  try { unlinkSync(setupFilePath(marketKey, tf)); } catch {}
+  if (!tf) {
+    // Legacy: also try the no-tf path explicitly (already done above).
+  }
   const db = await getDB();
   if (db) {
-    try { await db.collection("active_setups").deleteOne({ _id: marketKey }); }
+    try { await db.collection("active_setups").deleteOne({ _id: setupMongoId(marketKey, tf) }); }
     catch (e) { console.warn(`[MongoDB] clearSetup: ${e.message}`); }
   }
   // Mark the corresponding setup_log entry CANCELLED so the dashboard stops
@@ -1899,7 +1982,7 @@ function updateWeeklyRecap(marketKey, event) {
 
 // ── Discord ───────────────────────────────────────────────────────────────────
 
-const DASHBOARD_URL = process.env.DASHBOARD_URL || env.DASHBOARD_URL || "http://178.104.80.233:8082/dashboard";
+const DASHBOARD_URL = process.env.DASHBOARD_URL || env.DASHBOARD_URL || "https://app.tradingvisualizer.com/dashboard";
 
 function _fp(p) {
   if (p == null) return "—";
@@ -1907,41 +1990,262 @@ function _fp(p) {
   return p.toFixed(5);
 }
 
-// Minimal notifications — no signal data, just alert + link to dashboard.
-// Users klikken naar de dashboard om details te zien (privacy + traffic naar app).
-async function _sendNotify(title, url = DASHBOARD_URL) {
-  const content = `${title}\n→ ${url}`;
-  try {
-    await fetch(DISCORD_WEBHOOK, {
+// ── Discord message translations (EN + NL) ─────────────────────────────────
+// Functions take {market, tf} or {marketKey, event} and return localized string.
+// User's language preference (User.language) selects which version they get.
+const I18N_DISCORD = {
+  step1: {
+    en: ({ market, tf }) => `🔵 **${market}** · ${tf} — step 1 complete, waiting for step 2`,
+    nl: ({ market, tf }) => `🔵 **${market}** · ${tf} — stap 1 compleet, wacht op stap 2`,
+  },
+  setup_new: {
+    en: ({ market, tf }) => `🟢 **${market}** · ${tf} — new setup ✓ — open dashboard for details`,
+    nl: ({ market, tf }) => `🟢 **${market}** · ${tf} — nieuwe setup ✓ — open dashboard voor details`,
+  },
+  entry_filled: {
+    en: ({ marketKey }) => `🟡 **${marketKey}** — entry filled`,
+    nl: ({ marketKey }) => `🟡 **${marketKey}** — entry gevuld`,
+  },
+  sl_hit: {
+    en: ({ marketKey }) => `🔴 **${marketKey}** — SL hit`,
+    nl: ({ marketKey }) => `🔴 **${marketKey}** — SL geraakt`,
+  },
+  tp1_hit: {
+    en: ({ marketKey }) => `🎯 **${marketKey}** — TP1 hit`,
+    nl: ({ marketKey }) => `🎯 **${marketKey}** — TP1 geraakt`,
+  },
+  tp2_hit: {
+    en: ({ marketKey }) => `🏆 **${marketKey}** — TP2 hit`,
+    nl: ({ marketKey }) => `🏆 **${marketKey}** — TP2 geraakt`,
+  },
+  tp3_hit: {
+    en: ({ marketKey }) => `🚀 **${marketKey}** — TP3 hit`,
+    nl: ({ marketKey }) => `🚀 **${marketKey}** — TP3 geraakt 🚀`,
+  },
+  runner_be: {
+    en: ({ marketKey }) => `🛡️ **${marketKey}** — runner SL moved to break-even`,
+    nl: ({ marketKey }) => `🛡️ **${marketKey}** — runner SL naar break-even`,
+  },
+  // Sales / FOMO message for exhausted free users (TP2/TP3 wins only)
+  win_sales: {
+    en: ({ marketKey, event }) =>
+      `🔥 **${marketKey} just hit ${event === "TP3_HIT" ? "TP3 (10R runner!)" : "TP2 (+2R win)"}**\n` +
+      `Auto-Trade users captured this automatically. You missed it.\n` +
+      `🤖 Upgrade to never miss another one again.`,
+    nl: ({ marketKey, event }) =>
+      `🔥 **${marketKey} heeft net ${event === "TP3_HIT" ? "TP3 gehit (10R runner!)" : "TP2 gehit (+2R winst)"}**\n` +
+      `Auto-Trade gebruikers hebben deze automatisch gepakt. Jij niet.\n` +
+      `🤖 Upgrade om dit nooit meer te missen.`,
+  },
+};
+
+function _trDiscord(key, lang, vars) {
+  const fn = I18N_DISCORD[key]?.[lang] || I18N_DISCORD[key]?.en;
+  return fn ? fn(vars) : key;
+}
+
+// ── ISO-week start (UTC, monday) — mirrors api/server.js logic ──────────────
+function _isoWeekStartUtcMs() {
+  const d = new Date();
+  const day = d.getUTCDay();
+  const diff = day === 0 ? 6 : day - 1;
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - diff);
+}
+
+// Has a free user already had their "1 winning trade" for the current week?
+// Returns true if any TP2-hit (or WIN-outcome) is logged in setup_log between
+// the user's effective window-start (max of weekStart and createdAt) and the
+// reference timestamp `asOfMs` (exclusive — so the CURRENT event doesn't
+// count as exhaustion of itself).
+function _freeUserExhaustedAt(setupLog, userCreatedMs, weekStartMs, asOfMs) {
+  const since = Math.max(weekStartMs, userCreatedMs || 0);
+  return setupLog.some(e => {
+    const t = e.tp2HitTs || (e.outcome === "WIN" ? (e.ts ?? 0) : 0);
+    return t >= since && t < asOfMs;
+  });
+}
+
+// ── Per-user Discord broadcast — tier+window-aware audience ─────────────────
+// Three audiences are computed:
+//
+//   PAID/ADMIN:          always get the standard message.
+//   FREE in-window:      week not yet exhausted (no TP2 since their week-start)
+//                        → also get standard live messages (their "trial week")
+//   FREE exhausted:      already had a TP2 this week
+//                        → for "wins" audience: get sales-framed FOMO message
+//                          for "paid" audience: get nothing (no live signals)
+//
+// For TP2/TP3 events, pass `eventTs` so the exhaustion check uses the moment
+// JUST BEFORE the event. This way the very TP2 that EXHAUSTS the user is still
+// delivered to them as a normal "you won!" message — and only subsequent wins
+// switch to sales-only.
+// _sendNotify({ key, vars, audience, salesKey, salesVars, url, eventTs })
+//   key:       i18n key for the standard message (e.g. "tp2_hit")
+//   vars:      object passed to the i18n function (e.g. { marketKey })
+//   audience:  "paid" | "wins"
+//   salesKey:  i18n key for the sales-framed message to exhausted free users
+//              (only used when audience === "wins")
+//   salesVars: vars for sales message
+//   url:       link appended to standard message (defaults to DASHBOARD_URL)
+//   eventTs:   exhaustion check uses this timestamp (default: now)
+//
+// The recipient's language preference (User.language) determines which
+// localized message they receive. Falls back to EN if missing.
+async function _sendNotify(opts = {}) {
+  // Backward-compat: legacy callers pass a string ("title") as first arg.
+  // We send that as-is (no translation, paid+admin only, no exhaustion logic).
+  if (typeof opts === "string") {
+    const content = `${opts}\n→ ${DASHBOARD_URL}`;
+    const sends = [];
+    if (DISCORD_WEBHOOK) {
+      sends.push(fetch(DISCORD_WEBHOOK, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      }).catch(() => {}));
+    }
+    try {
+      const db = await getDB();
+      if (db) {
+        const subs = await db.collection("users").find({
+          discordWebhookUrl:     { $exists: true, $ne: null, $ne: "" },
+          discordWebhookEnabled: { $ne: false },
+          $or: [
+            { isAdmin: true },
+            { subscriptionTier: { $in: ["signal", "auto-trade"] },
+              subscriptionStatus: { $in: ["active", "trialing"] },
+              tradingLocked: { $ne: true } },
+          ],
+        }).project({ discordWebhookUrl: 1 }).toArray();
+        for (const s of subs) {
+          sends.push(fetch(s.discordWebhookUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content }),
+          }).catch(() => {}));
+        }
+      }
+    } catch {}
+    await Promise.allSettled(sends);
+    return;
+  }
+
+  const { key, vars = {}, audience = "paid", salesKey, salesVars, url = DASHBOARD_URL, eventTs = Date.now() } = opts;
+  const upgradeUrl = url.replace("/dashboard", "/billing");
+  const sends = [];
+
+  // 1. Global webhook — admin's master channel always gets EN by default
+  if (DISCORD_WEBHOOK) {
+    sends.push(fetch(DISCORD_WEBHOOK, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
-    });
-  } catch (e) {
-    console.error(`[DISCORD] Failed: ${e.message}`);
+      body: JSON.stringify({ content: `${_trDiscord(key, "en", vars)}\n→ ${url}` }),
+    }).catch(e => console.error(`[DISCORD global] Failed: ${e.message}`)));
   }
+
+  // 2. Per-user webhooks (per-user language)
+  try {
+    const db = await getDB();
+    if (!db) { await Promise.allSettled(sends); return; }
+
+    const setupLog = readJSON(SETUP_LOG_FILE, []);
+    const weekStartMs = _isoWeekStartUtcMs();
+
+    // Paid + admin users — always get the standard live message in their language
+    const isPaidActive = {
+      subscriptionTier: { $in: ["signal", "auto-trade"] },
+      subscriptionStatus: { $in: ["active", "trialing"] },
+      tradingLocked: { $ne: true },
+    };
+    const paidUsers = await db.collection("users").find({
+      discordWebhookUrl:     { $exists: true, $ne: null, $ne: "" },
+      discordWebhookEnabled: { $ne: false },
+      $or: [{ isAdmin: true }, isPaidActive],
+    }).project({ email: 1, discordWebhookUrl: 1, language: 1 }).toArray();
+
+    for (const u of paidUsers) {
+      const lang = u.language === "nl" ? "nl" : "en";
+      const content = `${_trDiscord(key, lang, vars)}\n→ ${url}`;
+      sends.push(fetch(u.discordWebhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      }).then(r => { if (!r.ok) console.warn(`[DISCORD paid ${u.email}] HTTP ${r.status}`); })
+        .catch(e => console.warn(`[DISCORD paid ${u.email}] Failed: ${e.message}`)));
+    }
+
+    // Free users — split into in-window (live signals) vs exhausted (sales-only)
+    const freeUsers = await db.collection("users").find({
+      discordWebhookUrl:     { $exists: true, $ne: null, $ne: "" },
+      discordWebhookEnabled: { $ne: false },
+      isAdmin:               { $ne: true },
+      subscriptionTier:      "free",
+    }).project({ email: 1, discordWebhookUrl: 1, language: 1, createdAt: 1 }).toArray();
+
+    for (const u of freeUsers) {
+      const lang = u.language === "nl" ? "nl" : "en";
+      const userCreatedMs = u.createdAt ? new Date(u.createdAt).getTime() : 0;
+      const exhausted = _freeUserExhaustedAt(setupLog, userCreatedMs, weekStartMs, eventTs);
+
+      if (!exhausted) {
+        const content = `${_trDiscord(key, lang, vars)}\n→ ${url}`;
+        sends.push(fetch(u.discordWebhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        }).then(r => { if (!r.ok) console.warn(`[DISCORD free in-window ${u.email}] HTTP ${r.status}`); })
+          .catch(e => console.warn(`[DISCORD free in-window ${u.email}] Failed: ${e.message}`)));
+      } else if (audience === "wins" && salesKey) {
+        const content = `${_trDiscord(salesKey, lang, salesVars || vars)}\n→ Upgrade: ${upgradeUrl}`;
+        sends.push(fetch(u.discordWebhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        }).then(r => { if (!r.ok) console.warn(`[DISCORD free sales ${u.email}] HTTP ${r.status}`); })
+          .catch(e => console.warn(`[DISCORD free sales ${u.email}] Failed: ${e.message}`)));
+      }
+      // else: exhausted, non-win event → silent
+    }
+  } catch (e) {
+    console.error(`[DISCORD per-user broadcast] DB error: ${e.message}`);
+  }
+  await Promise.allSettled(sends);
 }
 
 async function sendDiscordStep1(market, tf /*, ...unused*/) {
-  // Subtle heads-up — step 1 only. No levels, no times.
-  await _sendNotify(`🔵 **${market}** · ${tf} — stap 1 compleet, wacht op stap 2`);
+  await _sendNotify({ key: "step1", vars: { market, tf }, audience: "paid" });
   console.log(`[DISCORD] Step-1 notify sent: ${market} ${tf}`);
 }
 
 async function sendDiscordSetup(setup) {
-  // Setup created — user opens dashboard for full details.
-  await _sendNotify(`🟢 **${setup.market}** · ${setup.tf} — nieuwe setup ✓ — open dashboard voor details`);
+  await _sendNotify({ key: "setup_new", vars: { market: setup.market, tf: setup.tf }, audience: "paid" });
   console.log(`[DISCORD] Setup notify sent: ${setup.market} ${setup.tf}`);
 }
 
 async function sendDiscordTradeEvent(marketKey, event /*, details*/) {
-  const emoji = event === "SL_HIT" ? "🔴" : event === "TP1_HIT" ? "🎯" : event === "TP2_HIT" ? "🏆" : "📊";
-  const label = event === "ENTRY_TRIGGERED" ? "entry gevuld"
-              : event === "SL_HIT"          ? "SL geraakt"
-              : event === "TP1_HIT"         ? "TP1 geraakt"
-              : event === "TP2_HIT"         ? "TP2 geraakt"
-              : event;
-  await _sendNotify(`${emoji} **${marketKey}** — ${label}`);
+  // Map event → translation key
+  const keyMap = {
+    ENTRY_TRIGGERED: "entry_filled",
+    SL_HIT:          "sl_hit",
+    TP1_HIT:         "tp1_hit",
+    TP2_HIT:         "tp2_hit",
+    TP3_HIT:         "tp3_hit",
+    RUNNER_BE_STOP:  "runner_be",
+  };
+  const key = keyMap[event];
+  if (!key) {
+    console.warn(`[DISCORD] unknown trade event: ${event}`);
+    return;
+  }
+  const isWin = event === "TP2_HIT" || event === "TP3_HIT";
+  await _sendNotify({
+    key,
+    vars: { marketKey },
+    audience: isWin ? "wins" : "paid",
+    salesKey: isWin ? "win_sales" : undefined,
+    salesVars: isWin ? { marketKey, event } : undefined,
+    eventTs: Date.now(),
+  });
 }
 
 // ── Premium / Discount entry-zone filter ─────────────────────────────────────
@@ -2630,7 +2934,15 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   // ── Signal validation & setup creation ───────────────────────────────────
   const currentPrice = candles[candles.length - 1]?.close ?? 0;
   const currentTime  = tsToETLabel(candles[candles.length - 1]?.timestamp ?? Date.now() / 1000);
-  let activeSetup = await loadSetup(marketKey);
+
+  // PER-TF iteration: each timeframe has its own setup slot via per-TF files.
+  // Lets a market run 6H + 90M + daily setups in parallel with independent
+  // lifecycle. Inside the loop, `activeSetup` is scoped to the current TF;
+  // event filtering uses `tfEvents` (the cardEvents matching this TF).
+  const allTfSetups = await loadAllSetups(marketKey);
+  for (const _currentTf of PRIMARY_TFS) {
+  let activeSetup = allTfSetups[_currentTf];
+  const tfEvents  = cardEvents.filter(e => e.tf === _currentTf);
 
   // ════════════════════════════════════════════════════════════════════════════
   // RECOVERY-PAD #1 — "Halverwege gestrand" detectie
@@ -2757,7 +3069,15 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
 
   // Validate and auto-correct setup state against actual candles
   if (activeSetup) {
+    const before = activeSetup.status;
     activeSetup = verifySetupAgainstCandles(activeSetup, candles, marketKey);
+    // Persist corrected status (e.g. ACTIVE → CLOSED_SL when SL was hit in
+    // historical candles). Without this, the file stays stale and the slot
+    // appears occupied, blocking new same-TF setups from being created.
+    if (activeSetup && activeSetup.status !== before) {
+      await saveSetup(marketKey, activeSetup);
+      patchSetupLog(activeSetup.id, { status: activeSetup.status, slHit: activeSetup.slHit });
+    }
 
     // ── Robust field repair — runs every tick so ALL setups (new + old) end up
     // with a complete step-1 hit time and a correct entry-window clock time.
@@ -2994,7 +3314,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   }
 
   // Process card events — all step-1 alerts first, then the first step-2 creates a setup
-  for (const ev of cardEvents.filter(e => e.step === 1)) {
+  for (const ev of tfEvents.filter(e => e.step === 1)) {
     const { tf, direction, ref, cycleLabel } = ev;
     const isBuy    = direction === "BUY";
     const hitTime  = isBuy ? ref.hitHigh?.time : ref.hitLow?.time;
@@ -3006,7 +3326,7 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   // furthest above entry for SELL. SL ≈ sweep depth ± buffer (per lib-sl), so
   // we rank by sweep depth: BUY → lowest swept low wins; SELL → highest swept high wins.
   // Result: SL sits beyond all other TFs' stops, surviving more market noise.
-  const step2Events = cardEvents.filter(e => e.step === 2);
+  const step2Events = tfEvents.filter(e => e.step === 2);
   const completeEv = step2Events.length <= 1 ? step2Events[0] : step2Events
     .map(ev => {
       const isBuy = ev.direction === "BUY";
@@ -3115,7 +3435,24 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
       nextPhase2Label = relevantP2?.label ?? "soon";
     }
 
-    if (validSweepPattern) {
+    // Don't clobber a live setup. Single-setup-per-market file format means
+    // assigning a new setup to activeSetup overwrites the running ACTIVE/RUNNING
+    // setup's tracking (entry, SL, TP progression, trigger flags). That breaks
+    // verifySetupAgainstCandles + bridge state and orphans the broker position.
+    // WAITING_PHASE2 may be replaced — it's pre-entry, the new sweep refines it.
+    // True parallel-TF support requires a multi-setup architecture (Issue B,
+    // deferred). For now: skip new-setup creation when a live setup is on file.
+    const liveSetupExists = activeSetup
+      && activeSetup.status !== "WAITING_PHASE2"
+      && !String(activeSetup.status ?? "").startsWith("CLOSED")
+      && !String(activeSetup.status ?? "").startsWith("CANCELLED")
+      && !String(activeSetup.status ?? "").startsWith("INVALID");
+    if (validSweepPattern && liveSetupExists) {
+      logEvent(marketKey, "SETUP_BLOCKED",
+        `${direction} | ${tf} new sweep — blocked by live ${activeSetup.tf} ${activeSetup.status} setup`,
+        "skipped");
+    }
+    if (validSweepPattern && !liveSetupExists) {
     const setupId = `${marketKey}-${tfSrc}-${Date.now()}`;
     const setup = {
       id:              setupId,
@@ -3398,10 +3735,18 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
   // setup (catches edge cases like mis-attributed outcomes or missed patches).
   reconcileActiveSetup(activeSetup);
 
-  // Also verify ANY other ACTIVE setup_log entries for this market — needed
-  // because the active-slot file holds only one setup per market, so a 6H + 90M
-  // pair gets one of them orphaned. Without this scan the orphan never closes.
-  verifyOrphanedActives(marketKey, candles, activeSetup?.id ?? null, dailyEq, sixHEq);
+  allTfSetups[_currentTf] = activeSetup ?? null;
+  } // ── end per-TF loop ───────────────────────────────────────────────────
+
+  // Pick a "primary" setup for downstream code (scalp anchor, market_data
+  // dashboard write). Preference order: 6H first (longest horizon), then 90M,
+  // then daily. Scalps still piggyback on whichever primary is active.
+  let activeSetup = allTfSetups["6H"] ?? allTfSetups["90min"] ?? allTfSetups["daily"] ?? null;
+
+  // Multi-setup orphan scan: pass ALL current per-TF setup ids so genuine
+  // parallel setups don't get treated as orphans of each other.
+  const activeIds = Object.values(allTfSetups).filter(s => s?.id).map(s => s.id);
+  verifyOrphanedActives(marketKey, candles, activeIds, dailyEq, sixHEq);
 
   // ── SCALP detection (22.5M + 5.625M sweep-sweep aligned with ACTIVE primary) ─
   // Both cycle-tfs are scalps with +1h entry windows + 5R/8R TP. Independent
@@ -3475,6 +3820,9 @@ async function analyzeMarket(marketKey, candles, dailyLockState = null, dailyLoc
       activeP2: phaseInfo.activeP2 ? { cycle: phaseInfo.activeP2.cycle, label: phaseInfo.activeP2.label } : null,
     },
     activeSetup,
+    // All per-TF setups, so the dashboard/API can show parallel 6H + 90M + daily
+    // setups simultaneously instead of just the primary one.
+    activeSetups: allTfSetups,
     cycles6H: Object.values(cycles6H).map(c => ({
       name: c.name, label: c.label, status: c.status,
       high: c.high, low: c.low, hitHigh: c.hitHigh, hitLow: c.hitLow,

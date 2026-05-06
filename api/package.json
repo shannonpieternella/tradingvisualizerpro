@@ -13,6 +13,7 @@
     "jsonwebtoken": "^9.0.3",
     "metaapi.cloud-sdk": "^29.3.3",
     "mongoose": "^9.4.1",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "stripe": "^22.1.0"
   }
 }

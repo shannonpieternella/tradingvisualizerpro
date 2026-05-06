@@ -120,6 +120,17 @@ export async function getOpenPositions(accountId) {
   return req(MT_CLIENT_HOST, `/users/current/accounts/${accountId}/positions`);
 }
 
+// Deal history between two timestamps (ISO strings). Includes trades AND
+// balance ops (deposits/withdrawals/credits). Used to track capital flows
+// for accurate performance-fee calculation.
+export async function getDealsByTimeRange(accountId, startISO, endISO, offset = 0, limit = 1000) {
+  const params = new URLSearchParams({
+    startTime: startISO, endTime: endISO,
+    offset:    String(offset), limit: String(limit),
+  });
+  return req(MT_CLIENT_HOST, `/users/current/accounts/${accountId}/history-deals/time/${startISO}/${endISO}?${params.toString()}`);
+}
+
 // Close a single open position on a subscriber account. MetaApi expects the
 // position id and an actionType. We use POSITION_CLOSE_ID which closes the
 // full volume immediately at market price.
