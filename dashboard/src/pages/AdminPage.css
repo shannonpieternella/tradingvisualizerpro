@@ -231,3 +231,137 @@
 @media (max-width: 480px) {
   .ap-trade-actions .ap-btn-primary { width: 100%; }
 }
+
+/* Global pause toggle in admin header — visible regardless of tab */
+.ap-pause-btn {
+  border: 1px solid;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.6px;
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: all 0.15s;
+}
+.ap-pause-btn:disabled { opacity: 0.5; cursor: wait; }
+.ap-pause-btn-running {
+  background: rgba(74,222,128,0.10);
+  border-color: rgba(74,222,128,0.35);
+  color: #4ade80;
+}
+.ap-pause-btn-running:hover:not(:disabled) {
+  background: rgba(248,113,113,0.10);
+  border-color: rgba(248,113,113,0.35);
+  color: #f87171;
+}
+.ap-pause-btn-paused {
+  background: rgba(248,113,113,0.18);
+  border-color: rgba(248,113,113,0.5);
+  color: #f87171;
+  animation: ap-pause-pulse 1.6s ease-in-out infinite;
+}
+@keyframes ap-pause-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(248,113,113,0.4); }
+  50%      { box-shadow: 0 0 0 6px rgba(248,113,113,0); }
+}
+
+/* Subscriptions tab */
+.ap-subs-summary {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px; margin-bottom: 18px;
+}
+.ap-subs-table {
+  width: 100%; border-collapse: collapse; margin-top: 8px;
+  background: #0f1620; border: 1px solid #1a2332; border-radius: 8px;
+}
+.ap-subs-table th {
+  text-align: left; padding: 10px 12px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.6px; color: #6b7280;
+  border-bottom: 1px solid #1a2332; background: rgba(255,255,255,0.02);
+}
+.ap-subs-table td {
+  padding: 12px; font-size: 13px; color: #c9d3e3;
+  border-bottom: 1px solid #131b27; vertical-align: middle;
+}
+.ap-subs-table tbody tr:hover { background: rgba(255,255,255,0.02); }
+.ap-row-locked { background: rgba(248,113,113,0.04); }
+
+.ap-user-cell strong { display: block; }
+.ap-user-cell .ap-user-email { font-size: 11px; color: #6b7280; margin-top: 2px; }
+.ap-admin-pill {
+  font-size: 9px; padding: 1px 6px; border-radius: 4px;
+  background: rgba(251,191,36,0.18); color: #fbbf24;
+  font-weight: 700; margin-left: 6px; vertical-align: middle;
+}
+
+.ap-tier-pill {
+  display: inline-block; font-size: 11px; padding: 3px 9px;
+  border-radius: 999px; font-weight: 600;
+}
+.ap-tier-free       { background: rgba(156,163,175,0.18); color: #9ca3af; }
+.ap-tier-auto-trade { background: rgba(74,222,128,0.18); color: #4ade80; }
+
+.ap-status-active  { color: #4ade80; font-size: 12px; font-weight: 600; }
+.ap-status-trial   { color: #60a5fa; font-size: 12px; font-weight: 600; }
+.ap-status-late    { color: #f87171; font-size: 12px; font-weight: 600; }
+.ap-status-cancel  { color: #9ca3af; font-size: 12px; font-weight: 600; }
+.ap-status-none    { color: #6b7280; font-size: 12px; }
+
+.ap-flag-on       { color: #4ade80; font-size: 12px; font-weight: 600; }
+.ap-flag-pending  { color: #fbbf24; font-size: 12px; font-weight: 600; }
+.ap-flag-limited  { color: #60a5fa; font-size: 12px; font-weight: 600; }
+.ap-flag-off      { color: #9ca3af; font-size: 12px; }
+
+.ap-inv-due   { color: #f87171; font-size: 12px; font-weight: 700; }
+.ap-inv-clear { color: #6b7280; }
+.ap-addon-active { color: #fbbf24; font-size: 12px; font-weight: 600; }
+
+/* Webhook column buttons */
+.ap-webhook-btn {
+  border: 1px solid #1a2332; border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; cursor: pointer;
+  background: rgba(255,255,255,0.04); color: #c9d3e3;
+  transition: all 0.15s;
+}
+.ap-webhook-btn:hover { background: rgba(255,255,255,0.08); }
+.ap-webhook-set { border-color: rgba(74,222,128,0.4); color: #4ade80; }
+.ap-webhook-empty { color: #6b7280; }
+.ap-webhook-empty:hover { color: #c9d3e3; border-color: #2a3748; }
+
+/* Modal */
+.ap-modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000; padding: 20px;
+}
+.ap-modal {
+  background: #0f1620; border: 1px solid #1a2332; border-radius: 12px;
+  width: 100%; max-width: 540px; box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.ap-modal-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 16px 20px; border-bottom: 1px solid #1a2332;
+}
+.ap-modal-head h3 { margin: 0; font-size: 15px; font-weight: 600; color: #c9d3e3; }
+.ap-modal-close {
+  background: none; border: none; color: #6b7280;
+  font-size: 24px; cursor: pointer; padding: 0; line-height: 1;
+}
+.ap-modal-close:hover { color: #c9d3e3; }
+.ap-modal-body { padding: 20px; }
+.ap-modal-help { font-size: 13px; color: #9ca3af; margin: 0 0 12px; }
+.ap-modal-input {
+  width: 100%; padding: 10px 12px; box-sizing: border-box;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid #1a2332; border-radius: 6px;
+  color: #c9d3e3; font-size: 12px; font-family: monospace;
+}
+.ap-modal-input:focus { border-color: #4ade80; outline: none; }
+.ap-modal-msg { margin-top: 10px; padding: 8px 12px; border-radius: 6px; font-size: 12px; }
+.ap-msg-ok  { background: rgba(74,222,128,0.10); color: #4ade80; border: 1px solid rgba(74,222,128,0.3); }
+.ap-msg-err { background: rgba(248,113,113,0.10); color: #f87171; border: 1px solid rgba(248,113,113,0.3); }
+.ap-modal-actions { display: flex; gap: 10px; margin-top: 16px; justify-content: flex-end; flex-wrap: wrap; }
+.ap-btn-test { background: rgba(96,165,250,0.10); border: 1px solid rgba(96,165,250,0.3); color: #60a5fa; }
+.ap-btn-test:hover { background: rgba(96,165,250,0.20); }
+.ap-modal-hint { margin-top: 14px; font-size: 11px; color: #6b7280; line-height: 1.5; }

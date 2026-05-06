@@ -467,20 +467,22 @@ function findBestCandleRef(candidates, dir) {
 }
 
 // Entry window based on WHEN the sweep happened — fixed, not current-time.
-// Window-open is at :30, but entry is taken on the +15min candle, so labels are :45.
+// Compare against the actual entry candle (:45). A sweep that happens up to and
+// including the entry minute still maps to that window; a sweep one minute later
+// has missed it and rolls to the next window.
 function entryWindowForSweepTime(timeStr) {
   if (!timeStr) return null;
   try {
     const [h, m] = timeStr.split(":").map(Number);
     const mins = h * 60 + m;
     const ENTRIES = [
-      { mins:  2 * 60 + 30, label: "02:45" },
-      { mins:  8 * 60 + 30, label: "08:45" },
-      { mins: 14 * 60 + 30, label: "14:45" },
-      { mins: 20 * 60 + 30, label: "20:45" },
+      { mins:  2 * 60 + 45, label: "02:45" },
+      { mins:  8 * 60 + 45, label: "08:45" },
+      { mins: 14 * 60 + 45, label: "14:45" },
+      { mins: 20 * 60 + 45, label: "20:45" },
     ];
-    const next = ENTRIES.find(e => e.mins > mins);
-    return next ? next.label : "02:45"; // after 20:30 → next session
+    const next = ENTRIES.find(e => e.mins >= mins);
+    return next ? next.label : "02:45"; // after 20:45 → next session
   } catch { return null; }
 }
 
@@ -510,18 +512,20 @@ function nextScalpEntryWindowFromNow() {
 }
 
 // Fallback for cards still waiting on a sweep — preview the NEXT entry window
-// from current ET time so step 3 always shows when entry would fire.
+// from current ET time so step 3 always shows when entry would fire. Keep the
+// current entry label visible up to and including the entry minute (:45); only
+// roll to the next window once that minute has passed.
 function nextEntryWindowFromNow() {
   try {
     const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
     const mins = et.getHours() * 60 + et.getMinutes();
     const ENTRIES = [
-      { mins:  2 * 60 + 30, label: "02:45" },
-      { mins:  8 * 60 + 30, label: "08:45" },
-      { mins: 14 * 60 + 30, label: "14:45" },
-      { mins: 20 * 60 + 30, label: "20:45" },
+      { mins:  2 * 60 + 45, label: "02:45" },
+      { mins:  8 * 60 + 45, label: "08:45" },
+      { mins: 14 * 60 + 45, label: "14:45" },
+      { mins: 20 * 60 + 45, label: "20:45" },
     ];
-    const next = ENTRIES.find(e => e.mins > mins);
+    const next = ENTRIES.find(e => e.mins >= mins);
     return next ? next.label : "02:45";
   } catch { return "02:45"; }
 }

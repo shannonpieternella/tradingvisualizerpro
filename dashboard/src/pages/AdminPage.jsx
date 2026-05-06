@@ -45,6 +45,8 @@ function Bar({ value, max, label }) {
 export default function AdminPage() {
   const { authFetch, user } = useAuth();
   const [tab, setTab]               = useState("analytics"); // analytics | users | brokers | vnc
+  const [systemPaused, setSystemPaused] = useState(false);
+  const [pauseBusy, setPauseBusy]       = useState(false);
   const [users, setUsers]           = useState([]);
   const [analytics, setAnalytics]   = useState(null);
   const [brokers, setBrokers]       = useState(null);
@@ -91,9 +93,92 @@ export default function AdminPage() {
   // account — only fetch when actually viewing).
   useEffect(() => { if (tab === "brokers" && !brokers) refreshBrokers(); }, [tab, brokers, refreshBrokers]);
 
+  // System pause state — fetch on mount + on every refresh.
+  const refreshSystemState = useCallback(async () => {
+    try {
+      const r = await authFetch("/api/admin/system-state").then(r => r.json());
+      if (r.ok) setSystemPaused(!!r.paused);
+    } catch {}
+  }, [authFetch]);
+  useEffect(() => { refreshSystemState(); }, [refreshSystemState]);
+
+  const toggleSystemPause = useCallback(async () => {
+    if (pauseBusy) return;
+    const next = !systemPaused;
+    if (next && !confirm("PAUZE: alle nieuwe broker-signals worden geblokkeerd. Doorgaan?")) return;
+    setPauseBusy(true);
+    try {
+      const r = await authFetch("/api/admin/system-state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paused: next }),
+      }).then(r => r.json());
+      if (r.ok) setSystemPaused(!!r.paused);
+      else setError(r.error || "toggle failed");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setPauseBusy(false);
+    }
+  }, [authFetch, systemPaused, pauseBusy]);
+
   // Trade tab state
   const [positions, setPositions] = useState([]);
   const [tradeForm, setTradeForm] = useState({ market: "ETHUSD", direction: "SELL", entry: "", sl: "", volume: "" });
+  const [subs, setSubs] = useState([]);
+  const [webhookEdit, setWebhookEdit] = useState(null);   // { userId, email, currentUrl }
+  const [webhookInput, setWebhookInput] = useState("");
+  const [webhookBusy, setWebhookBusy] = useState(false);
+  const [webhookMsg, setWebhookMsg] = useState(null);
+
+  const refreshSubs = useCallback(async () => {
+    try {
+      const r = await authFetch("/api/admin/users-subscriptions").then(r => r.json());
+      if (r.ok) setSubs(r.users ?? []);
+    } catch {}
+  }, [authFetch]);
+  useEffect(() => { if (tab === "subscriptions") refreshSubs(); }, [tab, refreshSubs]);
+
+  const openWebhookEdit = (user) => {
+    setWebhookEdit({ userId: user.id, email: user.email, name: user.name, currentUrl: user.discordWebhookUrl || "" });
+    setWebhookInput(user.discordWebhookUrl || "");
+    setWebhookMsg(null);
+  };
+  const closeWebhookEdit = () => { setWebhookEdit(null); setWebhookInput(""); setWebhookMsg(null); };
+
+  const saveWebhook = async () => {
+    if (!webhookEdit) return;
+    setWebhookBusy(true);
+    setWebhookMsg(null);
+    try {
+      const r = await authFetch(`/api/admin/users/${webhookEdit.userId}/webhook`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ discordWebhookUrl: webhookInput.trim() || null }),
+      }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || "Save failed");
+      setWebhookMsg("✓ Opgeslagen");
+      await refreshSubs();
+      setTimeout(() => closeWebhookEdit(), 800);
+    } catch (e) {
+      setWebhookMsg(`⚠ ${e.message}`);
+    } finally { setWebhookBusy(false); }
+  };
+
+  const testWebhook = async () => {
+    if (!webhookEdit) return;
+    setWebhookBusy(true);
+    setWebhookMsg(null);
+    try {
+      const r = await authFetch(`/api/admin/users/${webhookEdit.userId}/webhook/test`, {
+        method: "POST",
+      }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || "Test failed");
+      setWebhookMsg("✓ Test-bericht verzonden — check Discord");
+    } catch (e) {
+      setWebhookMsg(`⚠ ${e.message}`);
+    } finally { setWebhookBusy(false); }
+  };
 
   // Live TP preview — same 1R/2R/10R rule as the server's computeSweepTP, so
   // the form mirrors what'll actually be dispatched. Returns null until both
@@ -200,6 +285,14 @@ export default function AdminPage() {
           </div>
         </div>
         <div className="ap-controls">
+          <button
+            className={`ap-pause-btn ${systemPaused ? "ap-pause-btn-paused" : "ap-pause-btn-running"}`}
+            onClick={toggleSystemPause}
+            disabled={pauseBusy}
+            title={systemPaused ? "Klik om broker-signals te hervatten" : "Klik om alle broker-signals te pauzeren"}
+          >
+            {pauseBusy ? "…" : systemPaused ? "▶ START signals" : "⏸ PAUZE signals"}
+          </button>
           <select value={days} onChange={e => setDays(parseInt(e.target.value))} className="ap-select">
             <option value={1}>laatste 24u</option>
             <option value={7}>laatste 7 dagen</option>
@@ -216,6 +309,9 @@ export default function AdminPage() {
         </button>
         <button className={tab === "users" ? "ap-tab-active" : ""} onClick={() => setTab("users")}>
           👥 Users ({users.length})
+        </button>
+        <button className={tab === "subscriptions" ? "ap-tab-active" : ""} onClick={() => setTab("subscriptions")}>
+          💳 Subscriptions
         </button>
         <button className={tab === "brokers" ? "ap-tab-active" : ""} onClick={() => setTab("brokers")}>
           💼 Brokers{brokers ? ` (${brokers.totals.accounts})` : ""}
@@ -363,6 +459,156 @@ export default function AdminPage() {
             }
           </div>
         </section>
+      )}
+
+      {tab === "subscriptions" && (
+        <section>
+          <div className="ap-subs-summary">
+            <div className="ap-stat">
+              <div className="ap-stat-label">Auto-Trade actief</div>
+              <div className="ap-stat-value">{subs.filter(s => s.tier === "auto-trade" && (s.status === "active" || s.status === "trialing")).length}</div>
+            </div>
+            <div className="ap-stat">
+              <div className="ap-stat-label">In trial</div>
+              <div className="ap-stat-value">{subs.filter(s => s.status === "trialing").length}</div>
+            </div>
+            <div className="ap-stat">
+              <div className="ap-stat-label">Past due (gelocked)</div>
+              <div className="ap-stat-value">{subs.filter(s => s.tradingLocked).length}</div>
+            </div>
+            <div className="ap-stat">
+              <div className="ap-stat-label">Free tier</div>
+              <div className="ap-stat-value">{subs.filter(s => s.tier === "free" && !s.isAdmin).length}</div>
+            </div>
+          </div>
+          <table className="ap-subs-table">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Tier</th>
+                <th>Status</th>
+                <th>Signals</th>
+                <th>Copy-Trading</th>
+                <th>Broker accounts</th>
+                <th>Add-ons</th>
+                <th>€/mnd</th>
+                <th>Discord webhook</th>
+                <th>Periode tot</th>
+                <th>Open facturen</th>
+              </tr>
+            </thead>
+            <tbody>
+              {subs.map(s => (
+                <tr key={s.id} className={s.tradingLocked ? "ap-row-locked" : ""}>
+                  <td>
+                    <div className="ap-user-cell">
+                      <strong>{s.name}</strong>
+                      {s.isAdmin && <span className="ap-admin-pill">⭐ ADMIN</span>}
+                      <div className="ap-user-email">{s.email}</div>
+                    </div>
+                  </td>
+                  <td>
+                    <span className={`ap-tier-pill ap-tier-${s.tier}`}>
+                      {s.tier === "auto-trade" ? "Auto-Trade" : "Gratis"}
+                    </span>
+                  </td>
+                  <td>
+                    {s.status === "active"   ? <span className="ap-status-active">● Actief</span>
+                    : s.status === "trialing" ? <span className="ap-status-trial">● Trial</span>
+                    : s.status === "past_due" ? <span className="ap-status-late">● Achterstallig</span>
+                    : s.status === "canceled" ? <span className="ap-status-cancel">● Geannuleerd</span>
+                    : <span className="ap-status-none">—</span>}
+                  </td>
+                  <td>
+                    {s.signalAccess === "FULL"
+                      ? <span className="ap-flag-on">✓ Onbeperkt</span>
+                      : <span className="ap-flag-limited">↻ 1/wk gratis</span>}
+                  </td>
+                  <td>
+                    {s.copyTrading === "ACTIVE"
+                      ? <span className="ap-flag-on">✓ Live</span>
+                    : s.copyTrading === "READY_NO_BROKER"
+                      ? <span className="ap-flag-pending">⏳ Geen broker</span>
+                      : <span className="ap-flag-off">✗ Inactief</span>}
+                  </td>
+                  <td>
+                    {s.brokerAccounts.total > 0
+                      ? `${s.brokerAccounts.deployed}/${s.brokerAccounts.total} deployed`
+                      : "—"}
+                  </td>
+                  <td>
+                    {s.isAdmin ? <span className="ap-flag-on">∞ free</span>
+                    : s.addOnCount > 0 ? <span className="ap-addon-active">{s.addOnCount}× €19</span>
+                    : <span className="ap-flag-off">—</span>}
+                  </td>
+                  <td>
+                    <strong>{s.monthlyCents > 0 ? `€${(s.monthlyCents/100).toFixed(0)}` : "€0"}</strong>
+                  </td>
+                  <td>
+                    {s.discordWebhookUrl
+                      ? <button className="ap-webhook-btn ap-webhook-set" onClick={() => openWebhookEdit(s)} title={s.discordWebhookUrl}>
+                          {s.discordWebhookEnabled ? "🟢" : "⏸"} ingesteld ✏️
+                        </button>
+                      : <button className="ap-webhook-btn ap-webhook-empty" onClick={() => openWebhookEdit(s)}>
+                          + webhook toevoegen
+                        </button>}
+                  </td>
+                  <td>{s.periodEnd ? new Date(s.periodEnd).toLocaleDateString("nl-NL", { day: "2-digit", month: "short", year: "2-digit" }) : "—"}</td>
+                  <td>
+                    {s.openInvoices.count > 0
+                      ? <span className="ap-inv-due">{s.openInvoices.count}× (€{(s.openInvoices.total/100).toFixed(2)})</span>
+                      : <span className="ap-inv-clear">—</span>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {/* Webhook edit modal */}
+      {webhookEdit && (
+        <div className="ap-modal-overlay" onClick={closeWebhookEdit}>
+          <div className="ap-modal" onClick={e => e.stopPropagation()}>
+            <div className="ap-modal-head">
+              <h3>Discord webhook — {webhookEdit.name}</h3>
+              <button className="ap-modal-close" onClick={closeWebhookEdit}>×</button>
+            </div>
+            <div className="ap-modal-body">
+              <p className="ap-modal-help">
+                Plak hier de Discord webhook-URL van deze user. Hij ontvangt vanaf nu
+                signal-notificaties op zijn eigen Discord channel.
+              </p>
+              <input
+                className="ap-modal-input"
+                type="text"
+                placeholder="https://discord.com/api/webhooks/..."
+                value={webhookInput}
+                onChange={e => setWebhookInput(e.target.value)}
+                autoFocus
+              />
+              {webhookMsg && (
+                <div className={`ap-modal-msg ${webhookMsg.startsWith("✓") ? "ap-msg-ok" : "ap-msg-err"}`}>
+                  {webhookMsg}
+                </div>
+              )}
+              <div className="ap-modal-actions">
+                <button className="ap-btn" onClick={closeWebhookEdit} disabled={webhookBusy}>Annuleren</button>
+                {webhookEdit.currentUrl && (
+                  <button className="ap-btn ap-btn-test" onClick={testWebhook} disabled={webhookBusy || !!webhookInput && webhookInput !== webhookEdit.currentUrl}>
+                    Test bericht sturen
+                  </button>
+                )}
+                <button className="ap-btn ap-btn-primary" onClick={saveWebhook} disabled={webhookBusy}>
+                  {webhookBusy ? "…" : "Opslaan"}
+                </button>
+              </div>
+              <div className="ap-modal-hint">
+                Webhook aanmaken: in Discord → Server Settings → Integrations → Webhooks → New Webhook → kies channel → Copy URL.
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {tab === "brokers" && (

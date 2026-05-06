@@ -1,0 +1,143 @@
+
+/* Free-tier lock overlay (replaces signal cards when weekly exhausted) */
+.freetier-lock-card {
+  max-width: 720px; margin: 24px auto; padding: 40px 32px;
+  text-align: center;
+  background: linear-gradient(135deg, #0f1620, #1a2332);
+  border: 2px solid rgba(248,113,113,0.3);
+  border-radius: 14px;
+  color: #c9d3e3;
+}
+.freetier-lock-emoji { font-size: 48px; margin-bottom: 12px; }
+.freetier-lock-card h2 { margin: 0 0 12px; font-size: 22px; color: #f87171; }
+.freetier-lock-trade {
+  background: rgba(74,222,128,0.10); border: 1px solid rgba(74,222,128,0.3);
+  border-radius: 8px; padding: 12px; margin: 16px auto;
+  max-width: 480px; font-size: 14px; color: #4ade80;
+}
+.freetier-lock-trade strong { color: #c9d3e3; }
+.freetier-lock-reset { font-size: 14px; color: #9ca3af; margin: 14px 0; }
+.freetier-lock-reset strong { color: #fbbf24; }
+.freetier-lock-cta-text { font-size: 14px; color: #c9d3e3; margin: 18px 0 12px; }
+.freetier-lock-btn {
+  display: inline-block; padding: 14px 28px;
+  background: #4ade80; color: #0f1620;
+  border-radius: 8px; font-size: 15px; font-weight: 700;
+  text-decoration: none; transition: all 0.15s;
+}
+.freetier-lock-btn:hover { background: #22c55e; transform: scale(1.02); }
+
+/* Free-tier lock overlay */
+.freetier-lock-card {
+  max-width: 720px; margin: 24px auto; padding: 40px 32px;
+  text-align: center;
+  background: linear-gradient(135deg, #0f1620, #1a2332);
+  border: 2px solid rgba(248,113,113,0.3);
+  border-radius: 14px;
+  color: #c9d3e3;
+}
+.freetier-lock-emoji { font-size: 48px; margin-bottom: 12px; }
+.freetier-lock-card h2 { margin: 0 0 12px; font-size: 22px; color: #f87171; }
+.freetier-lock-trade {
+  background: rgba(74,222,128,0.10); border: 1px solid rgba(74,222,128,0.3);
+  border-radius: 8px; padding: 12px; margin: 16px auto;
+  max-width: 480px; font-size: 14px; color: #4ade80;
+}
+.freetier-lock-trade strong { color: #c9d3e3; }
+.freetier-lock-reset { font-size: 14px; color: #9ca3af; margin: 14px 0; }
+.freetier-lock-reset strong { color: #fbbf24; }
+.freetier-lock-cta-text { font-size: 14px; color: #c9d3e3; margin: 18px 0 12px; }
+.freetier-lock-btn {
+  display: inline-block; padding: 14px 28px;
+  background: #4ade80; color: #0f1620;
+  border-radius: 8px; font-size: 15px; font-weight: 700;
+  text-decoration: none; transition: all 0.15s;
+}
+.freetier-lock-btn:hover { background: #22c55e; }
+
+/* FOMO feed — won trades that free user missed this week */
+.freetier-fomo {
+  margin: 22px auto; max-width: 560px;
+  background: rgba(248,113,113,0.04);
+  border: 1px solid rgba(248,113,113,0.25);
+  border-radius: 10px; padding: 16px;
+}
+.freetier-fomo-head {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 16px; color: #c9d3e3;
+}
+.freetier-fomo-fire { font-size: 20px; }
+.freetier-fomo-head strong { color: #f87171; font-weight: 700; }
+.freetier-fomo-tag {
+  font-size: 11px; padding: 2px 8px; border-radius: 4px;
+  background: rgba(248,113,113,0.18); color: #f87171; margin-left: auto;
+}
+.freetier-fomo-sub { font-size: 12px; color: #9ca3af; margin: 8px 0 12px; }
+.freetier-fomo-list { list-style: none; padding: 0; margin: 0; text-align: left; }
+.freetier-fomo-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto auto;
+  gap: 10px; align-items: center;
+  padding: 8px 0; border-bottom: 1px dashed rgba(255,255,255,0.05);
+  font-size: 13px;
+}
+.freetier-fomo-item:last-child { border-bottom: none; }
+.freetier-fomo-dir { font-size: 14px; font-weight: 700; }
+.freetier-fomo-buy  { color: #4ade80; }
+.freetier-fomo-sell { color: #f87171; }
+.freetier-fomo-mkt  { font-weight: 700; color: #c9d3e3; }
+.freetier-fomo-tf   { font-size: 10px; color: #6b7280; text-transform: uppercase; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.04); }
+.freetier-fomo-result { font-size: 12px; color: #4ade80; font-weight: 600; }
+.freetier-fomo-time { font-size: 11px; color: #6b7280; }
+.freetier-fomo-more { font-size: 12px; color: #6b7280; padding: 8px 0; text-align: center; font-style: italic; }
+
+.freetier-lock-cta-buttons { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-top: 8px; }
+.freetier-lock-btn-secondary {
+  background: rgba(96,165,250,0.10); color: #60a5fa;
+  border: 1px solid rgba(96,165,250,0.4);
+}
+.freetier-lock-btn-secondary:hover { background: rgba(96,165,250,0.20); }
+@media (max-width: 600px) {
+  .freetier-fomo-item { grid-template-columns: auto 1fr auto; }
+  .freetier-fomo-tf, .freetier-fomo-time { display: none; }
+}
+
+/* Mentor block — locked state for free users */
+.mentor-locked {
+  background: linear-gradient(180deg, rgba(74,222,128,0.06), #0f1620);
+  border: 1px solid rgba(74,222,128,0.30);
+  border-radius: 12px;
+  padding: 28px 24px;
+  text-align: center;
+  height: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px;
+}
+.mentor-locked-icon { font-size: 42px; }
+.mentor-locked h3 {
+  margin: 4px 0 6px;
+  font-size: 18px; font-weight: 700;
+  color: #c9d3e3;
+}
+.mentor-locked p {
+  margin: 0 0 12px;
+  font-size: 13px; line-height: 1.55;
+  color: #9ca3af;
+  max-width: 280px;
+}
+.mentor-locked-tag {
+  display: inline-block; padding: 4px 10px;
+  background: rgba(251,191,36,0.15); border: 1px solid rgba(251,191,36,0.35);
+  color: #fbbf24; border-radius: 999px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.6px;
+  margin-bottom: 14px;
+}
+.mentor-locked-btn {
+  display: inline-block; padding: 11px 18px;
+  background: #4ade80; color: #0f1620;
+  border-radius: 8px;
+  font-size: 13px; font-weight: 700;
+  text-decoration: none;
+  transition: background 0.15s, transform 0.15s;
+}
+.mentor-locked-btn:hover { background: #22c55e; transform: translateY(-1px); }

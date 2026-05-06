@@ -99,6 +99,30 @@ export default function MentorBlock({ activeTrade, progress, market = "NAS100", 
         }),
       });
 
+      // Defensive: if backend returns a JSON error (auth fail, gate fail, OPENAI
+      // missing) instead of an event-stream, parse it and surface gracefully.
+      // Otherwise React tries to render a never-ending pending state and looks
+      // like the page froze.
+      const ct = res.headers.get("content-type") || "";
+      if (!res.ok || ct.includes("application/json")) {
+        let errText = `HTTP ${res.status}`;
+        try { const j = await res.json(); errText = j.error || errText; } catch {}
+        setMessages(prev => {
+          const updated = [...prev];
+          updated[assistantIdx] = { role: "assistant", content: `⚠ ${errText}` };
+          return updated;
+        });
+        return;
+      }
+      if (!res.body) {
+        setMessages(prev => {
+          const updated = [...prev];
+          updated[assistantIdx] = { role: "assistant", content: "⚠ No response stream" };
+          return updated;
+        });
+        return;
+      }
+
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -186,8 +210,8 @@ export default function MentorBlock({ activeTrade, progress, market = "NAS100", 
                 <p>
                   {firstName ? `Hé ${firstName}! ` : ""}
                   {filter?.matrixOnly ? "🔓 Matrix-only filter actief." :
-                   filter?.dir !== "ALL" ? `${filter.dir === "BUY" ? "▲ BUY" : "▼ SELL"} filter actief.` :
-                   filter?.cycle !== "ALL" ? `${filter.cycle} filter actief.` :
+                   (filter?.dir && filter.dir !== "ALL") ? `${filter.dir === "BUY" ? "▲ BUY" : "▼ SELL"} filter actief.` :
+                   (filter?.cycle && filter.cycle !== "ALL") ? `${filter.cycle} filter actief.` :
                    "Stel me alles over de huidige trade, signalen of strategie."}
                 </p>
                 <div className="chat-suggestions">
@@ -197,8 +221,8 @@ export default function MentorBlock({ activeTrade, progress, market = "NAS100", 
                     ? ["Beste BUY setup nu?", "Wat is het risico op de BUY?", "Wanneer is het BUY window open?", "Waarom bullish bias?"]
                     : filter?.dir === "SELL"
                     ? ["Beste SELL setup nu?", "Wat is het risico op de SELL?", "Wanneer is het SELL window open?", "Waarom bearish bias?"]
-                    : filter?.cycle !== "ALL"
-                    ? [`${filter?.cycle} setup uitleggen`, `Wanneer is ${filter?.cycle} actief?`, "Entry window nu open?", "Waarom deze bias?"]
+                    : (filter?.cycle && filter.cycle !== "ALL")
+                    ? [`${filter.cycle} setup uitleggen`, `Wanneer is ${filter.cycle} actief?`, "Entry window nu open?", "Waarom deze bias?"]
                     : ["Waarom deze bias?", "Leg de week structuur uit", "Wat zijn de EQH/EQL niveaus?", "Welke setup nu?", "Leg de cycle structuur uit"]
                   ).map(s => (
                     <button key={s} className="suggestion-btn" onClick={() => { setInput(s); inputRef.current?.focus(); }}>

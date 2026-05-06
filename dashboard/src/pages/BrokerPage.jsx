@@ -242,17 +242,67 @@ export default function BrokerPage() {
   const navigate = useNavigate();
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading]   = useState(true);
+  // Tier check — broker-koppeling is enkel voor Auto-Trade. Signal users zien
+  // upgrade-prompt; admin altijd toegang. Loaded via /api/billing/me.
+  const [tierInfo, setTierInfo] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await authFetch(`${API}/broker/accounts`);
-      const j = await r.json();
-      if (j.ok) setAccounts(j.accounts);
+      const [meRes, accRes] = await Promise.all([
+        authFetch("/api/billing/me").then(r => r.json()),
+        authFetch(`${API}/broker/accounts`).then(r => r.json()),
+      ]);
+      if (meRes.ok) setTierInfo(meRes);
+      if (accRes.ok) setAccounts(accRes.accounts);
     } finally { setLoading(false); }
   }, [authFetch]);
 
   useEffect(() => { load(); }, [load]);
+
+  const isAdmin    = !!user?.isAdmin;
+  const tier       = tierInfo?.tier ?? "free";
+  const isSignal   = tier === "signal";
+  const isFree     = tier === "free";
+  const canConnect = isAdmin || tier === "auto-trade";
+
+  // Show upgrade-screen for free + signal users (broker-koppeling = Auto-Trade only)
+  if (!loading && !canConnect) {
+    return (
+      <div className="bp-wrap">
+        <header className="bp-top">
+          <Link to="/dashboard" className="bp-back">← Dashboard</Link>
+          <h1>Broker connection</h1>
+        </header>
+        <div className="broker-upgrade-card">
+          <div className="broker-upgrade-icon">🔒</div>
+          <h2>Broker connection requires Auto-Trade</h2>
+          <p className="broker-upgrade-current">
+            Your current plan: <strong>{isSignal ? "AI-Analyst (€39/mo)" : "Free"}</strong>
+            {" — "}broker integration is only available on{" "}
+            <strong>Hands-Off AI (€69/mo)</strong>.
+          </p>
+          <p className="broker-upgrade-explain">
+            With Auto-Trade you connect your <strong>Liquid Markets MT5</strong> account once
+            and the AI executes every signal automatically — including Stop-Loss, Take-Profit
+            and break-even management. You stay in full control via the pause-button in dashboard.
+          </p>
+          <div className="broker-upgrade-features">
+            <div>🤖 AI executes trades on your broker</div>
+            <div>🛡️ Auto Stop-Loss + Take-Profit + BE-MOVE</div>
+            <div>📊 Live performance dashboard</div>
+            <div>🔌 Liquid Markets MT5 integration</div>
+          </div>
+          <Link to="/billing" className="broker-upgrade-btn">
+            Upgrade to Hands-Off AI — €69/mo →
+          </Link>
+          <p className="broker-upgrade-note">
+            Already have an account? Just upgrade your plan — your existing login stays the same.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   async function update(id, patch) {
     const r = await authFetch(`${API}/broker/accounts/${id}`, {
