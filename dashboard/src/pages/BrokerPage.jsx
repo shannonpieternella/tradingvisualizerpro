@@ -17,7 +17,7 @@ function StatusPill({ status, connection }) {
   return <span className={`bp-pill bp-pill-${cls}`}>{label}</span>;
 }
 
-function ConnectForm({ onConnected }) {
+function ConnectForm({ onConnected, currentCount = 0, isAdmin = false }) {
   const { authFetch } = useAuth();
   const [form, setForm] = useState({
     broker: "", login: "", password: "", server: "", platform: "mt5",
@@ -27,6 +27,14 @@ function ConnectForm({ onConnected }) {
   });
   const [busy, setBusy]   = useState(false);
   const [error, setError] = useState("");
+
+  // Compute what THIS new account will cost. First account is included in the
+  // €69 base; every account from #2 onwards adds €19/mo to the subscription.
+  // Admin users have no add-on charges.
+  const willBeAccountNum = currentCount + 1;
+  const isFirstAccount   = currentCount === 0;
+  const monthlyAfterAdd  = isAdmin ? 0 : 69 + Math.max(0, currentCount) * 19;
+  const monthlyBeforeAdd = isAdmin ? 0 : 69 + Math.max(0, currentCount - 1) * 19;
 
   function setField(k, v) { setForm(f => ({ ...f, [k]: v })); }
   function toggleMarket(m) {
@@ -40,6 +48,16 @@ function ConnectForm({ onConnected }) {
 
   async function submit(e) {
     e.preventDefault();
+    // For non-admin users on a 2nd+ account, confirm the price increase before
+    // submitting — never silently raise their bill.
+    if (!isAdmin && !isFirstAccount) {
+      const ok = window.confirm(
+        `Adding this broker account will raise your monthly subscription from ` +
+        `€${monthlyBeforeAdd} to €${monthlyAfterAdd} (proration applies for the remainder of this month). ` +
+        `Continue?`
+      );
+      if (!ok) return;
+    }
     setBusy(true); setError("");
     try {
       const r = await authFetch(`${API}/broker/connect`, {
@@ -62,6 +80,37 @@ function ConnectForm({ onConnected }) {
         Vul je MT4/MT5-login, password en server in. Wachtwoord wordt direct
         doorgestuurd naar MetaApi (gehost) en niet bij ons opgeslagen.
       </p>
+
+      {/* Transparent pricing banner — show user EXACTLY what this connection costs */}
+      {!isAdmin && (
+        <div className={`bp-pricing-banner ${isFirstAccount ? "bp-pricing-included" : "bp-pricing-extra"}`}>
+          {isFirstAccount ? (
+            <>
+              <div className="bp-pricing-icon">✓</div>
+              <div className="bp-pricing-text">
+                <strong>1st account — included in your €69/mo plan</strong>
+                <div>No extra charge. Add additional accounts later for €19/mo each.</div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="bp-pricing-icon">+€19</div>
+              <div className="bp-pricing-text">
+                <strong>This will be account #{willBeAccountNum} — adds €19/mo to your subscription</strong>
+                <div>Your monthly: <strong>€{monthlyBeforeAdd}</strong> → <strong>€{monthlyAfterAdd}</strong> (€69 base + {currentCount}× €19 add-ons after this)</div>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {isAdmin && (
+        <div className="bp-pricing-banner bp-pricing-admin">
+          <div className="bp-pricing-icon">⭐</div>
+          <div className="bp-pricing-text">
+            <strong>Admin — unlimited accounts, no charges.</strong>
+          </div>
+        </div>
+      )}
 
       <div className="bp-grid">
         <label>Platform
@@ -329,7 +378,34 @@ export default function BrokerPage() {
         <span className="bp-user">{user?.name}</span>
       </header>
 
-      <ConnectForm onConnected={a => setAccounts(s => [a, ...s])} />
+      {/* Cost overview banner — visible at top so user knows what they're paying */}
+      {!isAdmin && (
+        <div className="bp-cost-overview">
+          <div className="bp-cost-row">
+            <span className="bp-cost-label">Connected accounts</span>
+            <span className="bp-cost-value">{accounts.length}</span>
+          </div>
+          <div className="bp-cost-row">
+            <span className="bp-cost-label">Current monthly</span>
+            <span className="bp-cost-value">
+              €{accounts.length === 0 ? 69 : 69 + Math.max(0, accounts.length - 1) * 19}
+              <span className="bp-cost-breakdown">
+                (€69 base{accounts.length > 1 ? ` + ${accounts.length - 1}× €19 extras` : ""})
+              </span>
+            </span>
+          </div>
+          <div className="bp-cost-help">
+            💡 1st account is included in your €69 base subscription. Each additional broker
+            account adds €19/mo (Stripe pro-rata billing).
+          </div>
+        </div>
+      )}
+
+      <ConnectForm
+        onConnected={a => setAccounts(s => [a, ...s])}
+        currentCount={accounts.length}
+        isAdmin={isAdmin}
+      />
 
       <h2 className="bp-hed">Gekoppelde accounts ({accounts.length})</h2>
       {loading && <div className="bp-loading">Laden…</div>}
