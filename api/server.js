@@ -35,31 +35,57 @@ const MONGO_URI        = process.env.MONGO_URI        || env.MONGO_URI;
 const JWT_SECRET       = process.env.JWT_SECRET       || env.JWT_SECRET || "fallback_dev_secret";
 const MCP_URL          = "https://178-104-80-233.sslip.io/mcp";
 
-// ── Stripe (test/live mode aware via STRIPE_MODE env var) ────────────────────
-// Switch to live: edit /opt/trading-assistant/.env, set STRIPE_MODE=live and
-// fill STRIPE_LIVE_* vars, then `systemctl restart trading-api`. No code change.
-const STRIPE_MODE = (process.env.STRIPE_MODE || env.STRIPE_MODE || "test").toLowerCase();
-const stripeKeys = STRIPE_MODE === "live"
-  ? {
-      secret:        process.env.STRIPE_LIVE_SECRET_KEY        || env.STRIPE_LIVE_SECRET_KEY,
-      publishable:   process.env.STRIPE_LIVE_PUBLISHABLE_KEY   || env.STRIPE_LIVE_PUBLISHABLE_KEY,
-      webhookSecret: process.env.STRIPE_LIVE_WEBHOOK_SECRET    || env.STRIPE_LIVE_WEBHOOK_SECRET,
-      priceAuto:     process.env.STRIPE_LIVE_PRICE_ID_AUTO_TRADE || env.STRIPE_LIVE_PRICE_ID_AUTO_TRADE,
-      priceExtra:    process.env.STRIPE_LIVE_PRICE_ID_EXTRA_ACCOUNT || env.STRIPE_LIVE_PRICE_ID_EXTRA_ACCOUNT,
-      priceSignal:   process.env.STRIPE_LIVE_PRICE_ID_SIGNAL || env.STRIPE_LIVE_PRICE_ID_SIGNAL,
-    }
-  : {
-      secret:        process.env.STRIPE_SECRET_KEY        || env.STRIPE_SECRET_KEY,
-      publishable:   process.env.STRIPE_PUBLISHABLE_KEY   || env.STRIPE_PUBLISHABLE_KEY,
-      webhookSecret: process.env.STRIPE_WEBHOOK_SECRET    || env.STRIPE_WEBHOOK_SECRET,
-      priceAuto:     process.env.STRIPE_PRICE_ID_AUTO_TRADE || env.STRIPE_PRICE_ID_AUTO_TRADE,
-      priceExtra:    process.env.STRIPE_PRICE_ID_EXTRA_ACCOUNT || env.STRIPE_PRICE_ID_EXTRA_ACCOUNT,
-      priceSignal:   process.env.STRIPE_PRICE_ID_SIGNAL || env.STRIPE_PRICE_ID_SIGNAL,
-    };
+// ── Stripe (test/live mode — runtime-toggleable via /api/admin/billing/mode) ─
+// Both modes load their keys at startup; the active mode is stored in the
+// BillingConfig collection (admin-managed) and falls back to STRIPE_MODE env.
+// `stripe` and `stripeKeys` are reassigned by setStripeMode() — all 23 usage
+// sites read the live values via closure.
 const StripeSDK = (await import("stripe")).default;
-const stripe = stripeKeys.secret ? new StripeSDK(stripeKeys.secret) : null;
+const TEST_KEYS = {
+  secret:        process.env.STRIPE_SECRET_KEY        || env.STRIPE_SECRET_KEY,
+  publishable:   process.env.STRIPE_PUBLISHABLE_KEY   || env.STRIPE_PUBLISHABLE_KEY,
+  webhookSecret: process.env.STRIPE_WEBHOOK_SECRET    || env.STRIPE_WEBHOOK_SECRET,
+  priceAuto:     process.env.STRIPE_PRICE_ID_AUTO_TRADE     || env.STRIPE_PRICE_ID_AUTO_TRADE,
+  priceExtra:    process.env.STRIPE_PRICE_ID_EXTRA_ACCOUNT  || env.STRIPE_PRICE_ID_EXTRA_ACCOUNT,
+  priceSignal:   process.env.STRIPE_PRICE_ID_SIGNAL         || env.STRIPE_PRICE_ID_SIGNAL,
+};
+const LIVE_KEYS = {
+  secret:        process.env.STRIPE_LIVE_SECRET_KEY        || env.STRIPE_LIVE_SECRET_KEY,
+  publishable:   process.env.STRIPE_LIVE_PUBLISHABLE_KEY   || env.STRIPE_LIVE_PUBLISHABLE_KEY,
+  webhookSecret: process.env.STRIPE_LIVE_WEBHOOK_SECRET    || env.STRIPE_LIVE_WEBHOOK_SECRET,
+  priceAuto:     process.env.STRIPE_LIVE_PRICE_ID_AUTO_TRADE     || env.STRIPE_LIVE_PRICE_ID_AUTO_TRADE,
+  priceExtra:    process.env.STRIPE_LIVE_PRICE_ID_EXTRA_ACCOUNT  || env.STRIPE_LIVE_PRICE_ID_EXTRA_ACCOUNT,
+  priceSignal:   process.env.STRIPE_LIVE_PRICE_ID_SIGNAL         || env.STRIPE_LIVE_PRICE_ID_SIGNAL,
+};
+const TEST_SDK = TEST_KEYS.secret ? new StripeSDK(TEST_KEYS.secret) : null;
+const LIVE_SDK = LIVE_KEYS.secret ? new StripeSDK(LIVE_KEYS.secret) : null;
+
+// Active state — reassigned by setStripeMode().
+let STRIPE_MODE = (process.env.STRIPE_MODE || env.STRIPE_MODE || "test").toLowerCase();
+let stripeKeys  = STRIPE_MODE === "live" ? LIVE_KEYS : TEST_KEYS;
+let stripe      = STRIPE_MODE === "live" ? LIVE_SDK  : TEST_SDK;
+
+function setStripeMode(mode) {
+  const m = mode === "live" ? "live" : "test";
+  STRIPE_MODE = m;
+  stripeKeys  = m === "live" ? LIVE_KEYS : TEST_KEYS;
+  stripe      = m === "live" ? LIVE_SDK  : TEST_SDK;
+  console.log(`[Stripe] mode switched → ${m.toUpperCase()}`);
+}
+
 if (!stripe) console.warn(`[Stripe] No ${STRIPE_MODE.toUpperCase()} key configured — billing endpoints will return 503.`);
-else console.log(`[Stripe] ${STRIPE_MODE.toUpperCase()} mode active, price=${stripeKeys.priceAuto || "(not set)"}`);
+else console.log(`[Stripe] ${STRIPE_MODE.toUpperCase()} mode active (test ${TEST_SDK?"✓":"✗"}, live ${LIVE_SDK?"✓":"✗"})`);
+
+// BillingConfig — singleton doc that persists the active Stripe mode across
+// restarts. Loaded once at startup; admin POST /api/admin/billing/mode writes
+// here and calls setStripeMode() in-memory.
+const billingConfigSchema = new mongoose.Schema({
+  _id:           { type: String, default: "singleton" },
+  stripeMode:    { type: String, enum: ["test", "live"], default: "test" },
+  modeChangedAt: Date,
+  modeChangedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+}, { collection: "billingconfig" });
+const BillingConfig = mongoose.model("BillingConfig", billingConfigSchema);
 
 // Public app URL — used in Stripe Checkout success/cancel redirects + invoice links.
 const APP_URL = process.env.APP_URL || env.APP_URL || "https://app.tradingvisualizer.com";
@@ -73,8 +99,21 @@ for (const k of ["METAAPI_TOKEN","METAAPI_REGION","METAAPI_MASTER_ACCOUNT_ID","M
 const metaapi = await import("./metaapi-client.js");
 
 // ── MongoDB + User model ───────────────────────────────────────────────────────
-mongoose.connect(MONGO_URI).then(() => {
+mongoose.connect(MONGO_URI).then(async () => {
   console.log("MongoDB connected — tradingvisualizer");
+  // Load persisted Stripe mode (admin-toggleable). If no doc → seed with env value.
+  try {
+    let cfg = await BillingConfig.findById("singleton");
+    if (!cfg) {
+      cfg = await BillingConfig.create({ _id: "singleton", stripeMode: STRIPE_MODE });
+    }
+    if (cfg.stripeMode !== STRIPE_MODE) {
+      setStripeMode(cfg.stripeMode);
+      console.log(`[Stripe] applied persisted mode from BillingConfig: ${cfg.stripeMode}`);
+    }
+  } catch (e) {
+    console.warn(`[Stripe] BillingConfig load failed: ${e.message} — using env-default mode`);
+  }
 }).catch(err => {
   console.error("MongoDB connection error:", err.message);
 });
@@ -1756,27 +1795,47 @@ app.post("/api/billing/pay-invoice/:id", requireAuth, requireStripe, async (req,
   }
 });
 
-// Webhook handler (raw body parser is registered earlier near app setup)
+// Webhook handler (raw body parser is registered earlier near app setup).
+// Tries TEST and LIVE secrets in turn so the webhook accepts events from
+// either Stripe environment regardless of current mode. This lets admin run
+// a €1 live test while still receiving test-mode events on the same endpoint.
 stripeWebhookHandler = async (req, res) => {
-  if (!stripe) return res.status(503).end();
-  let event;
-  try {
-    if (stripeKeys.webhookSecret) {
-      event = stripe.webhooks.constructEvent(
-        req.body,                                   // raw Buffer
-        req.headers["stripe-signature"],
-        stripeKeys.webhookSecret,
-      );
-    } else {
-      // Dev mode (no signing secret yet): trust the body. Replace with signed
-      // verification once you've configured the webhook in Stripe dashboard.
-      event = JSON.parse(req.body.toString());
-      console.warn("[Stripe webhook] no signing secret — verifying disabled (dev mode)");
+  if (!TEST_SDK && !LIVE_SDK) return res.status(503).end();
+  const sig = req.headers["stripe-signature"];
+  const secrets = [LIVE_KEYS.webhookSecret, TEST_KEYS.webhookSecret].filter(Boolean);
+  let event = null;
+  let lastErr = null;
+  for (const secret of secrets) {
+    try {
+      event = (LIVE_SDK ?? TEST_SDK).webhooks.constructEvent(req.body, sig, secret);
+      break;
+    } catch (e) {
+      lastErr = e;
     }
-  } catch (err) {
-    console.error("[Stripe webhook] signature verification failed:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
+  if (!event && secrets.length === 0) {
+    // Dev fallback only when neither mode has a signing secret configured.
+    try { event = JSON.parse(req.body.toString()); }
+    catch (e) { lastErr = e; }
+    if (event) console.warn("[Stripe webhook] no signing secret — verification skipped (dev only)");
+  }
+  if (!event) {
+    console.error("[Stripe webhook] signature verification failed:", lastErr?.message);
+    return res.status(400).send(`Webhook Error: ${lastErr?.message ?? "no event"}`);
+  }
+  // Pick the SDK that matches the event's livemode flag, so subsequent
+  // stripe.X retrievals (e.g. subscriptions.retrieve) hit the right env.
+  const evtSdk = event.livemode ? LIVE_SDK : TEST_SDK;
+  if (!evtSdk) {
+    console.error(`[Stripe webhook] received ${event.livemode ? "live" : "test"} event but that mode is not configured`);
+    return res.status(400).send("Wrong mode");
+  }
+  // Override `stripe` for this request only — we re-bind the closure variable
+  // through a local. Side-effects below use the global `stripe`, so we
+  // temporarily reassign and restore. (Single-threaded Node = safe.)
+  const prevSdk = stripe;
+  stripe = evtSdk;
+  res.once("finish", () => { stripe = prevSdk; });
 
   try {
     switch (event.type) {
@@ -2363,6 +2422,89 @@ app.get("/api/admin/users/:id/accounts", requireAuth, requireAdmin, async (req, 
     };
   }));
   res.json({ ok: true, accounts: enriched });
+});
+
+// ── Admin: Stripe billing mode (test/live toggle + €1 live verification) ───
+// Returns the current state plus a configuration-readiness map so the admin
+// UI can show "live mode is missing webhook secret" before letting them flip.
+app.get("/api/admin/billing/mode", requireAuth, requireAdmin, async (_req, res) => {
+  const cfg = await BillingConfig.findById("singleton").lean();
+  const ready = (k) => ({
+    secret:        !!k.secret,
+    publishable:   !!k.publishable,
+    webhookSecret: !!k.webhookSecret,
+    priceAuto:     !!k.priceAuto,
+    priceSignal:   !!k.priceSignal,
+    priceExtra:    !!k.priceExtra,
+  });
+  const isReady = (k) => Object.values(ready(k)).every(Boolean);
+  res.json({
+    ok:           true,
+    activeMode:   STRIPE_MODE,
+    persistedMode: cfg?.stripeMode ?? null,
+    test: { ready: ready(TEST_KEYS), allReady: isReady(TEST_KEYS), publishable: TEST_KEYS.publishable ?? null },
+    live: { ready: ready(LIVE_KEYS), allReady: isReady(LIVE_KEYS), publishable: LIVE_KEYS.publishable ?? null },
+  });
+});
+
+// Switch Stripe mode at runtime. Refuses to switch to live unless ALL live
+// keys + price IDs + webhook secret are configured — prevents accidental
+// half-configured live mode that would 500 on every checkout.
+app.post("/api/admin/billing/mode", requireAuth, requireAdmin, async (req, res) => {
+  const target = req.body?.mode === "live" ? "live" : "test";
+  const targetKeys = target === "live" ? LIVE_KEYS : TEST_KEYS;
+  const missing = [];
+  if (!targetKeys.secret)        missing.push("secret_key");
+  if (!targetKeys.publishable)   missing.push("publishable_key");
+  if (!targetKeys.webhookSecret) missing.push("webhook_secret");
+  if (!targetKeys.priceAuto)     missing.push("price_auto_trade");
+  if (!targetKeys.priceSignal)   missing.push("price_signal");
+  if (!targetKeys.priceExtra)    missing.push("price_extra_account");
+  if (missing.length) {
+    return res.status(400).json({
+      ok: false,
+      error: `Cannot switch to ${target.toUpperCase()} — missing config: ${missing.join(", ")}`,
+      missing,
+    });
+  }
+  setStripeMode(target);
+  await BillingConfig.findByIdAndUpdate(
+    "singleton",
+    { stripeMode: target, modeChangedAt: new Date(), modeChangedBy: req.user.id },
+    { upsert: true },
+  );
+  res.json({ ok: true, activeMode: STRIPE_MODE });
+});
+
+// Create a one-time €1 Stripe Checkout session in the CURRENT mode — used for
+// end-to-end verification of the live keys + webhook plumbing without going
+// through a real subscription. Admin pays with their own card; refund manually
+// in Stripe dashboard afterwards.
+app.post("/api/admin/billing/test-checkout", requireAuth, requireAdmin, async (req, res) => {
+  if (!stripe) return res.status(503).json({ ok: false, error: "Stripe not configured for current mode" });
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      line_items: [{
+        quantity: 1,
+        price_data: {
+          currency: "eur",
+          unit_amount: 100, // €1.00
+          product_data: {
+            name: `TradingVisualizer ${STRIPE_MODE.toUpperCase()} verification (€1)`,
+            description: "End-to-end test charge by admin. Refund manually after success.",
+          },
+        },
+      }],
+      success_url: `${APP_URL}/admin?stripe_test=success`,
+      cancel_url:  `${APP_URL}/admin?stripe_test=cancel`,
+      metadata: { tradingvisualizer_test: "true", initiatedBy: String(req.user.id) },
+    });
+    res.json({ ok: true, url: session.url, mode: STRIPE_MODE });
+  } catch (err) {
+    console.error("/api/admin/billing/test-checkout:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // Admin: update per-user Discord webhook for signal notifications

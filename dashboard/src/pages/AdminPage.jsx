@@ -136,6 +136,10 @@ export default function AdminPage() {
   const [baselineInputs, setBaselineInputs] = useState({}); // accountId → string
   const [baselineBusy, setBaselineBusy] = useState(false);
   const [baselineMsg, setBaselineMsg] = useState(null);
+  // Stripe mode toggle state (test ↔ live)
+  const [billingMode, setBillingMode] = useState(null);  // { activeMode, test:{...}, live:{...} }
+  const [billingBusy, setBillingBusy] = useState(false);
+  const [billingMsg, setBillingMsg]   = useState(null);
 
   const refreshSubs = useCallback(async () => {
     try {
@@ -144,6 +148,56 @@ export default function AdminPage() {
     } catch {}
   }, [authFetch]);
   useEffect(() => { if (tab === "subscriptions") refreshSubs(); }, [tab, refreshSubs]);
+
+  const refreshBillingMode = useCallback(async () => {
+    try {
+      const r = await authFetch("/api/admin/billing/mode").then(r => r.json());
+      if (r.ok) setBillingMode(r);
+    } catch {}
+  }, [authFetch]);
+  useEffect(() => { if (tab === "subscriptions") refreshBillingMode(); }, [tab, refreshBillingMode]);
+
+  const switchBillingMode = async (target) => {
+    if (target === "live") {
+      const ok = window.confirm(
+        "ECHTE BETALINGEN ACTIVEREN?\n\n" +
+        "Vanaf nu rekent Stripe live af bij elke checkout.\n" +
+        "Geen test-cards meer. Annuleren via 'Switch back to test'.\n\n" +
+        "Doorgaan?",
+      );
+      if (!ok) return;
+    }
+    setBillingBusy(true);
+    setBillingMsg(null);
+    try {
+      const r = await authFetch("/api/admin/billing/mode", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: target }),
+      }).then(r => r.json());
+      if (!r.ok) {
+        setBillingMsg(`⚠ ${r.error}`);
+        return;
+      }
+      setBillingMsg(`✓ Stripe nu in ${r.activeMode.toUpperCase()} mode`);
+      await refreshBillingMode();
+    } catch (e) {
+      setBillingMsg(`⚠ ${e.message}`);
+    } finally { setBillingBusy(false); }
+  };
+
+  const runStripeTestCheckout = async () => {
+    setBillingBusy(true);
+    setBillingMsg(null);
+    try {
+      const r = await authFetch("/api/admin/billing/test-checkout", { method: "POST" }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || "Test checkout failed");
+      window.open(r.url, "_blank", "noopener");
+      setBillingMsg(`✓ ${r.mode.toUpperCase()} checkout geopend in nieuw tabblad — betaal met je eigen card`);
+    } catch (e) {
+      setBillingMsg(`⚠ ${e.message}`);
+    } finally { setBillingBusy(false); }
+  };
 
   const openWebhookEdit = (user) => {
     setWebhookEdit({ userId: user.id, email: user.email, name: user.name, currentUrl: user.discordWebhookUrl || "" });
@@ -509,6 +563,87 @@ export default function AdminPage() {
 
       {tab === "subscriptions" && (
         <section>
+          {/* Stripe billing mode panel */}
+          {billingMode && (
+            <div className={`ap-billing-panel ap-billing-${billingMode.activeMode}`}>
+              <div className="ap-billing-head">
+                <div className="ap-billing-title">
+                  Stripe billing —
+                  <span className={`ap-billing-pill ap-billing-pill-${billingMode.activeMode}`}>
+                    {billingMode.activeMode === "live" ? "🟢 LIVE" : "🟡 TEST"}
+                  </span>
+                </div>
+                <div className="ap-billing-actions">
+                  {billingMode.activeMode === "test" ? (
+                    <button
+                      className="ap-btn ap-btn-live-switch"
+                      onClick={() => switchBillingMode("live")}
+                      disabled={billingBusy || !billingMode.live.allReady}
+                      title={!billingMode.live.allReady ? "Live config incompleet — zie missende keys hieronder" : ""}
+                    >
+                      {billingBusy ? "…" : "→ Switch naar LIVE"}
+                    </button>
+                  ) : (
+                    <button
+                      className="ap-btn ap-btn-test-switch"
+                      onClick={() => switchBillingMode("test")}
+                      disabled={billingBusy}
+                    >
+                      {billingBusy ? "…" : "← Terug naar TEST"}
+                    </button>
+                  )}
+                  <button
+                    className="ap-btn ap-btn-test-checkout"
+                    onClick={runStripeTestCheckout}
+                    disabled={billingBusy}
+                    title="€1 checkout in huidige mode — verifieer end-to-end voor echte users"
+                  >
+                    €1 {billingMode.activeMode.toUpperCase()} test
+                  </button>
+                </div>
+              </div>
+              <div className="ap-billing-grid">
+                {["test", "live"].map(m => {
+                  const k = billingMode[m];
+                  const cells = [
+                    ["Secret key",    k.ready.secret],
+                    ["Publishable",   k.ready.publishable],
+                    ["Webhook secret",k.ready.webhookSecret],
+                    ["Price (Auto)",  k.ready.priceAuto],
+                    ["Price (Signal)",k.ready.priceSignal],
+                    ["Price (Extra)", k.ready.priceExtra],
+                  ];
+                  return (
+                    <div key={m} className={`ap-billing-col ap-billing-col-${m}`}>
+                      <div className="ap-billing-col-head">
+                        {m === "live" ? "🟢 LIVE keys" : "🟡 TEST keys"}
+                        {k.allReady ? <span className="ap-flag-on"> ✓ ready</span> : <span className="ap-flag-off"> ✗ incompleet</span>}
+                      </div>
+                      <ul className="ap-billing-checks">
+                        {cells.map(([label, ok]) => (
+                          <li key={label} className={ok ? "ap-check-on" : "ap-check-off"}>
+                            {ok ? "✓" : "✗"} {label}
+                          </li>
+                        ))}
+                      </ul>
+                      {k.publishable && <div className="ap-billing-pubkey">{k.publishable}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+              {billingMsg && (
+                <div className={`ap-billing-msg ${billingMsg.startsWith("✓") ? "ap-msg-ok" : "ap-msg-err"}`}>
+                  {billingMsg}
+                </div>
+              )}
+              <div className="ap-billing-hint">
+                {billingMode.activeMode === "live"
+                  ? "Live mode actief — elke checkout rekent echt af. €1 LIVE test = real €1 charge (refund handmatig in Stripe)."
+                  : "Test mode actief — checkouts gebruiken Stripe test-cards (4242 4242 4242 4242). Klaar voor productie? Vul live webhook secret en switch."}
+              </div>
+            </div>
+          )}
+
           <div className="ap-subs-summary">
             <div className="ap-stat">
               <div className="ap-stat-label">Auto-Trade actief</div>
