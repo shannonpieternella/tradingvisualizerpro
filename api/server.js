@@ -243,6 +243,13 @@ const brokerAccountSchema = new mongoose.Schema({
   riskMode:         { type: String, enum: ["percentBalance","fixedLot"], default: "percentBalance" },
   riskValue:        { type: Number, default: 1.0 },    // 1% balance per trade by default
   copyEnabled:      { type: Boolean, default: true },
+  // Starting balance — the equity baseline against which all profit (and our
+  // 10% performance fee) is measured. Set on first BalanceSnapshot if absent;
+  // admin can override (e.g. legacy Nate accounts started ~€800 each before
+  // we deployed snapshot tracking).
+  startingBalance:      { type: Number, default: null },
+  startingBalanceSetAt: { type: Date,   default: null },
+  startingBalanceSource:{ type: String, default: null }, // "first_snapshot" | "admin_override"
   createdAt:        { type: Date, default: Date.now },
   updatedAt:        { type: Date, default: Date.now },
 });
@@ -2149,16 +2156,103 @@ app.get("/api/admin/broker-analytics", requireAuth, requireAdmin, async (req, re
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Compute per-user equity progress aggregated across all their broker accounts.
+//   • startingTotal  = Σ account.startingBalance  (admin override or first snap)
+//   • currentTotal   = Σ latest BalanceSnapshot.equity
+//   • totalProfit    = currentTotal - startingTotal  (profit since day one)
+//   • dailyPnl       = currentTotal - equity 24h ago
+//   • estPerfFeeCents= 10% × max(0, totalProfit)  (your share — live, not month-end)
+// Used by admin subscriptions overview to track per-user growth daily.
+async function computeUserEquityProgress(userId, accounts) {
+  if (!accounts.length) {
+    return {
+      startingTotal:   null,
+      currentEquity:   null,
+      totalProfit:     null,
+      totalProfitPct:  null,
+      dailyPnl:        null,
+      dailyPnlPct:     null,
+      estPerfFeeCents: 0,
+      accountCount:    0,
+      lastUpdated:     null,
+      perAccount:      [],
+    };
+  }
+  const yesterday = new Date(Date.now() - 24 * 3600 * 1000);
+
+  async function progressForAccount(acc) {
+    const accId = acc.metaapiAccountId;
+    const [latest, firstEver, yestLast] = await Promise.all([
+      BalanceSnapshot.findOne({ metaapiAccountId: accId }).sort({ snapshotAt: -1 }).lean(),
+      BalanceSnapshot.findOne({ metaapiAccountId: accId }).sort({ snapshotAt: 1 }).lean(),
+      BalanceSnapshot.findOne({ metaapiAccountId: accId, snapshotAt: { $lt: yesterday } }).sort({ snapshotAt: -1 }).lean(),
+    ]);
+    // Baseline preference: explicit admin-set startingBalance > first-ever snapshot equity.
+    const baseline = acc.startingBalance != null
+      ? acc.startingBalance
+      : (firstEver?.equity ?? null);
+    const baselineSource = acc.startingBalance != null ? "admin_override" : (firstEver ? "first_snapshot" : null);
+    return {
+      accountId:      acc._id,
+      login:          acc.login,
+      broker:         acc.broker,
+      baseline,
+      baselineSource,
+      baselineSetAt:  acc.startingBalanceSetAt ?? firstEver?.snapshotAt ?? null,
+      currentEquity:  latest?.equity ?? null,
+      yestEquity:     yestLast?.equity ?? null,
+      lastSnapshotAt: latest?.snapshotAt ?? null,
+    };
+  }
+  const perAccount = await Promise.all(accounts.map(progressForAccount));
+
+  // Aggregate — only sum accounts with both baseline AND current data.
+  const usable = perAccount.filter(a => a.baseline != null && a.currentEquity != null);
+  const startingTotal  = usable.reduce((s, a) => s + a.baseline,      0);
+  const currentEquity  = usable.reduce((s, a) => s + a.currentEquity, 0);
+
+  // Daily aggregate — only accounts that ALSO have a >24h-old snapshot.
+  const usableDaily = usable.filter(a => a.yestEquity != null);
+  const dailyBase   = usableDaily.reduce((s, a) => s + a.yestEquity,    0);
+  const dailyNow    = usableDaily.reduce((s, a) => s + a.currentEquity, 0);
+
+  const totalProfit = usable.length ? currentEquity - startingTotal : null;
+  const dailyPnl    = usableDaily.length ? dailyNow - dailyBase     : null;
+
+  const lastUpdated = perAccount
+    .map(a => a.lastSnapshotAt)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b) - new Date(a))[0] ?? null;
+
+  return {
+    startingTotal:   usable.length ? startingTotal : null,
+    currentEquity:   usable.length ? currentEquity : null,
+    totalProfit,
+    totalProfitPct:  totalProfit != null && startingTotal > 0 ? (totalProfit / startingTotal) * 100 : null,
+    dailyPnl,
+    dailyPnlPct:     dailyPnl != null && dailyBase > 0 ? (dailyPnl / dailyBase) * 100 : null,
+    // Your live 10% — calculated on every refresh so you see it grow with the user.
+    estPerfFeeCents: totalProfit != null && totalProfit > 0 ? Math.round(totalProfit * 0.10 * 100) : 0,
+    accountCount:    accounts.length,
+    lastUpdated,
+    perAccount,
+  };
+}
+
 // Admin: list of all users with their subscription state — signal access +
 // copy-trading status (number of connected broker accounts) — zodat je in één
 // blik ziet wie betaalt voor wat.
 app.get("/api/admin/users-subscriptions", requireAuth, requireAdmin, async (req, res) => {
   const users = await User.find({}).sort({ createdAt: -1 }).lean();
-  // Aggregate broker-account counts per user
-  const accountAgg = await BrokerAccount.aggregate([
-    { $group: { _id: "$userId", count: { $sum: 1 }, deployed: { $sum: { $cond: [{ $eq: ["$status", "DEPLOYED"] }, 1, 0] } } } },
-  ]);
-  const accountMap = Object.fromEntries(accountAgg.map(a => [String(a._id), { total: a.count, deployed: a.deployed }]));
+  // Fetch ALL broker accounts in one query, group by userId — used for both
+  // counts AND the per-user equity-progress calculation.
+  const allAccounts = await BrokerAccount.find({}).lean();
+  const accountsByUser = new Map();
+  for (const a of allAccounts) {
+    const k = String(a.userId);
+    if (!accountsByUser.has(k)) accountsByUser.set(k, []);
+    accountsByUser.get(k).push(a);
+  }
   // Open invoice counts
   const invAgg = await Invoice.aggregate([
     { $match: { status: "open" } },
@@ -2166,50 +2260,109 @@ app.get("/api/admin/users-subscriptions", requireAuth, requireAdmin, async (req,
   ]);
   const invMap = Object.fromEntries(invAgg.map(i => [String(i._id), { count: i.count, total: i.totalAmount }]));
 
+  // Compute equity-progress per user in parallel (uses BalanceSnapshot — hourly cron data).
+  const progressByUser = new Map();
+  await Promise.all(users.map(async (u) => {
+    const accs = accountsByUser.get(String(u._id)) ?? [];
+    const prog = await computeUserEquityProgress(u._id, accs);
+    progressByUser.set(String(u._id), prog);
+  }));
+
   const out = users.map(u => {
-    const acc  = accountMap[String(u._id)] ?? { total: 0, deployed: 0 };
-    const inv  = invMap[String(u._id)]    ?? { count: 0, total: 0 };
+    const accs = accountsByUser.get(String(u._id)) ?? [];
+    const acc  = {
+      total:    accs.length,
+      deployed: accs.filter(a => a.status === "DEPLOYED").length,
+    };
+    const inv  = invMap[String(u._id)] ?? { count: 0, total: 0 };
     const tier = u.subscriptionTier ?? "free";
     const status = u.subscriptionStatus ?? null;
     const hasActiveSub = ["auto-trade", "signal"].includes(tier)
                       && (status === "active" || status === "trialing")
                       && !u.tradingLocked;
-    // €19 add-on per extra account — only auto-trade has broker accounts
     const extras = Math.max(0, acc.total - 1);
     const monthlyCents = u.isAdmin ? 0
                        : tier === "auto-trade" ? 6900 + extras * 1900
                        : tier === "signal"     ? 3900
                        : 0;
+    const progress = progressByUser.get(String(u._id));
     return {
       id:            u._id,
       name:          u.name,
       email:         u.email,
       isAdmin:       !!u.isAdmin,
       memberSince:   u.createdAt,
-      // Subscription
       tier,
       status,
       periodEnd:     u.subscriptionCurrentPeriodEnd ?? null,
       tradingLocked: !!u.tradingLocked,
-      // Two-flag breakdown for at-a-glance admin view
       signalAccess:    hasActiveSub || u.isAdmin ? "FULL" : "FREE_WEEKLY",
-      // Copy-trading only available on auto-trade tier — signal tier = signals only, manual trading
       copyTrading:     tier === "auto-trade" && hasActiveSub && acc.deployed > 0 ? "ACTIVE"
                      : tier === "auto-trade" && hasActiveSub ? "READY_NO_BROKER"
                      : "INACTIVE",
-      // Counts
       brokerAccounts: acc,
-      addOnCount:     u.isAdmin ? 0 : extras,                  // # extra accounts billed €19 each
-      monthlyCents,                                              // expected total monthly charge
+      addOnCount:     u.isAdmin ? 0 : extras,
+      monthlyCents,
       openInvoices:   inv,
-      // Stripe linkage
       hasStripeCustomer: !!u.stripeCustomerId,
-      // Per-user Discord webhook
       discordWebhookUrl:     u.discordWebhookUrl ?? null,
       discordWebhookEnabled: u.discordWebhookEnabled !== false,
+      // NEW — live equity progress (start-balance → now, daily Δ, your 10% share)
+      progress,
     };
   });
   res.json({ ok: true, users: out, total: out.length });
+});
+
+// Admin: set/override the starting balance for a specific broker account.
+// Used to seed legacy accounts (e.g. Nate's two MT5s started at ~€800 each
+// before BalanceSnapshot tracking went live). Once set this becomes the
+// baseline for ALL profit + 10% performance-fee calculations.
+app.patch("/api/admin/accounts/:id/starting-balance", requireAuth, requireAdmin, async (req, res) => {
+  const { startingBalance } = req.body ?? {};
+  if (typeof startingBalance !== "number" || !isFinite(startingBalance) || startingBalance < 0) {
+    return res.status(400).json({ ok: false, error: "startingBalance must be a non-negative number" });
+  }
+  const acc = await BrokerAccount.findByIdAndUpdate(
+    req.params.id,
+    {
+      startingBalance,
+      startingBalanceSetAt:  new Date(),
+      startingBalanceSource: "admin_override",
+    },
+    { new: true },
+  ).lean();
+  if (!acc) return res.status(404).json({ ok: false, error: "Account niet gevonden" });
+  res.json({ ok: true, account: {
+    id: acc._id, login: acc.login, broker: acc.broker,
+    startingBalance: acc.startingBalance, setAt: acc.startingBalanceSetAt,
+  }});
+});
+
+// Admin: list a single user's broker accounts with starting balances + current
+// equity. Used by the admin UI's "Edit baselines" drawer.
+app.get("/api/admin/users/:id/accounts", requireAuth, requireAdmin, async (req, res) => {
+  const accs = await BrokerAccount.find({ userId: req.params.id }).lean();
+  const enriched = await Promise.all(accs.map(async (a) => {
+    const latest = await BalanceSnapshot.findOne({ metaapiAccountId: a.metaapiAccountId }).sort({ snapshotAt: -1 }).lean();
+    const firstEver = await BalanceSnapshot.findOne({ metaapiAccountId: a.metaapiAccountId }).sort({ snapshotAt: 1 }).lean();
+    return {
+      id:                    a._id,
+      metaapiAccountId:      a.metaapiAccountId,
+      broker:                a.broker,
+      login:                 a.login,
+      status:                a.status,
+      startingBalance:       a.startingBalance,
+      startingBalanceSetAt:  a.startingBalanceSetAt,
+      startingBalanceSource: a.startingBalanceSource,
+      currentEquity:         latest?.equity ?? null,
+      currentBalance:        latest?.balance ?? null,
+      lastSnapshotAt:        latest?.snapshotAt ?? null,
+      firstSnapshotEquity:   firstEver?.equity ?? null,
+      firstSnapshotAt:       firstEver?.snapshotAt ?? null,
+    };
+  }));
+  res.json({ ok: true, accounts: enriched });
 });
 
 // Admin: update per-user Discord webhook for signal notifications

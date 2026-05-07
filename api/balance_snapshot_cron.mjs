@@ -66,6 +66,11 @@ for (const a of accounts) {
   try {
     const info = await metaapi.getAccountInformation(a.metaapiAccountId);
     if (info) {
+      // Detect whether this is the FIRST snapshot for this account. We use
+      // this both to seed startingBalance correctly and to skip a noisy
+      // double-write — only the first-ever snap becomes the baseline.
+      const isFirstEver = (await BalanceSnapshot.countDocuments({ metaapiAccountId: a.metaapiAccountId })) === 0;
+
       await BalanceSnapshot.create({
         userId:           a.userId,
         metaapiAccountId: a.metaapiAccountId,
@@ -77,6 +82,21 @@ for (const a of accounts) {
         marginLevel:      info.marginLevel,
         currency:         info.currency || "USD",
       });
+
+      // Seed startingBalance ONLY on the first-ever snap; admin can still
+      // override via PATCH /api/admin/accounts/:id/starting-balance.
+      if (isFirstEver && a.startingBalance == null) {
+        await BrokerAccount.updateOne(
+          { _id: a._id, startingBalance: { $in: [null, undefined] } },
+          {
+            $set: {
+              startingBalance:       info.equity,
+              startingBalanceSetAt:  new Date(),
+              startingBalanceSource: "first_snapshot",
+            },
+          },
+        );
+      }
       snapsOk++;
     } else {
       snapsFail++;

@@ -130,6 +130,12 @@ export default function AdminPage() {
   const [webhookInput, setWebhookInput] = useState("");
   const [webhookBusy, setWebhookBusy] = useState(false);
   const [webhookMsg, setWebhookMsg] = useState(null);
+  // Baseline editor (starting-balance per account)
+  const [baselineEdit, setBaselineEdit] = useState(null);   // { userId, name }
+  const [baselineAccounts, setBaselineAccounts] = useState([]);
+  const [baselineInputs, setBaselineInputs] = useState({}); // accountId → string
+  const [baselineBusy, setBaselineBusy] = useState(false);
+  const [baselineMsg, setBaselineMsg] = useState(null);
 
   const refreshSubs = useCallback(async () => {
     try {
@@ -178,6 +184,46 @@ export default function AdminPage() {
     } catch (e) {
       setWebhookMsg(`⚠ ${e.message}`);
     } finally { setWebhookBusy(false); }
+  };
+
+  const openBaselineEdit = async (user) => {
+    setBaselineEdit({ userId: user.id, name: user.name, email: user.email });
+    setBaselineAccounts([]);
+    setBaselineInputs({});
+    setBaselineMsg(null);
+    try {
+      const r = await authFetch(`/api/admin/users/${user.id}/accounts`).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || "Load failed");
+      setBaselineAccounts(r.accounts ?? []);
+      const inputs = {};
+      for (const a of r.accounts ?? []) inputs[a.id] = a.startingBalance != null ? String(a.startingBalance) : "";
+      setBaselineInputs(inputs);
+    } catch (e) {
+      setBaselineMsg(`⚠ ${e.message}`);
+    }
+  };
+  const closeBaselineEdit = () => {
+    setBaselineEdit(null); setBaselineAccounts([]); setBaselineInputs({}); setBaselineMsg(null);
+  };
+  const saveBaseline = async (accountId) => {
+    const val = parseFloat(baselineInputs[accountId]);
+    if (!isFinite(val) || val < 0) { setBaselineMsg("⚠ Voer een geldig bedrag in"); return; }
+    setBaselineBusy(true);
+    setBaselineMsg(null);
+    try {
+      const r = await authFetch(`/api/admin/accounts/${accountId}/starting-balance`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startingBalance: val }),
+      }).then(r => r.json());
+      if (!r.ok) throw new Error(r.error || "Save failed");
+      setBaselineMsg("✓ Opgeslagen");
+      // Refresh accounts list + parent table
+      await openBaselineEdit({ id: baselineEdit.userId, name: baselineEdit.name, email: baselineEdit.email });
+      await refreshSubs();
+    } catch (e) {
+      setBaselineMsg(`⚠ ${e.message}`);
+    } finally { setBaselineBusy(false); }
   };
 
   // Live TP preview — same 1R/2R/10R rule as the server's computeSweepTP, so
@@ -490,6 +536,10 @@ export default function AdminPage() {
                 <th>Signals</th>
                 <th>Copy-Trading</th>
                 <th>Broker accounts</th>
+                <th>Start → Nu</th>
+                <th>Winst totaal</th>
+                <th>Vandaag</th>
+                <th>Mijn 10%</th>
                 <th>Add-ons</th>
                 <th>€/mnd</th>
                 <th>Discord webhook</th>
@@ -509,7 +559,9 @@ export default function AdminPage() {
                   </td>
                   <td>
                     <span className={`ap-tier-pill ap-tier-${s.tier}`}>
-                      {s.tier === "auto-trade" ? "Auto-Trade" : "Gratis"}
+                      {s.tier === "auto-trade" ? "Auto-Trade"
+                       : s.tier === "signal"   ? "AI-Analyst"
+                       : "Gratis"}
                     </span>
                   </td>
                   <td>
@@ -533,8 +585,52 @@ export default function AdminPage() {
                   </td>
                   <td>
                     {s.brokerAccounts.total > 0
-                      ? `${s.brokerAccounts.deployed}/${s.brokerAccounts.total} deployed`
+                      ? <span>
+                          {s.brokerAccounts.deployed}/{s.brokerAccounts.total} deployed
+                          <button
+                            className="ap-baseline-btn"
+                            onClick={() => openBaselineEdit(s)}
+                            title="Bewerk start-balans per account"
+                          >📊</button>
+                        </span>
                       : "—"}
+                  </td>
+                  {/* Start → Now */}
+                  <td>
+                    {s.progress?.startingTotal != null ? (
+                      <div className="ap-prog-cell">
+                        <div className="ap-prog-line">€{s.progress.startingTotal.toFixed(0)} → €{s.progress.currentEquity.toFixed(0)}</div>
+                        <div className="ap-prog-sub">{s.progress.accountCount}× account</div>
+                      </div>
+                    ) : <span className="ap-flag-off">—</span>}
+                  </td>
+                  {/* Winst totaal */}
+                  <td>
+                    {s.progress?.totalProfit != null ? (
+                      <div className={s.progress.totalProfit >= 0 ? "ap-profit-pos" : "ap-profit-neg"}>
+                        <strong>{s.progress.totalProfit >= 0 ? "+" : ""}€{s.progress.totalProfit.toFixed(2)}</strong>
+                        {s.progress.totalProfitPct != null && (
+                          <span className="ap-prog-sub"> ({s.progress.totalProfitPct >= 0 ? "+" : ""}{s.progress.totalProfitPct.toFixed(1)}%)</span>
+                        )}
+                      </div>
+                    ) : <span className="ap-flag-off">—</span>}
+                  </td>
+                  {/* Daily Δ */}
+                  <td>
+                    {s.progress?.dailyPnl != null ? (
+                      <div className={s.progress.dailyPnl >= 0 ? "ap-profit-pos" : "ap-profit-neg"}>
+                        {s.progress.dailyPnl >= 0 ? "+" : ""}€{s.progress.dailyPnl.toFixed(2)}
+                        {s.progress.dailyPnlPct != null && (
+                          <div className="ap-prog-sub">{s.progress.dailyPnlPct >= 0 ? "+" : ""}{s.progress.dailyPnlPct.toFixed(2)}%</div>
+                        )}
+                      </div>
+                    ) : <span className="ap-flag-off">—</span>}
+                  </td>
+                  {/* Your 10% share */}
+                  <td>
+                    {s.progress?.estPerfFeeCents > 0
+                      ? <strong className="ap-fee-share">€{(s.progress.estPerfFeeCents/100).toFixed(2)}</strong>
+                      : <span className="ap-flag-off">—</span>}
                   </td>
                   <td>
                     {s.isAdmin ? <span className="ap-flag-on">∞ free</span>
@@ -605,6 +701,95 @@ export default function AdminPage() {
               </div>
               <div className="ap-modal-hint">
                 Webhook aanmaken: in Discord → Server Settings → Integrations → Webhooks → New Webhook → kies channel → Copy URL.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Baseline (starting balance) edit modal */}
+      {baselineEdit && (
+        <div className="ap-modal-overlay" onClick={closeBaselineEdit}>
+          <div className="ap-modal ap-modal-wide" onClick={e => e.stopPropagation()}>
+            <div className="ap-modal-head">
+              <h3>Start-balans — {baselineEdit.name}</h3>
+              <button className="ap-modal-close" onClick={closeBaselineEdit}>×</button>
+            </div>
+            <div className="ap-modal-body">
+              <p className="ap-modal-help">
+                De start-balans is de basis waarop alle winst (en jouw 10% performance fee)
+                wordt berekend. Auto-detectie pakt het eerste BalanceSnapshot, maar voor
+                legacy accounts (zoals Nate's twee MT5's die op €800 begonnen) override je hier.
+              </p>
+              {baselineAccounts.length === 0
+                ? <div className="ap-prog-sub">Geen broker accounts gekoppeld.</div>
+                : (
+                  <table className="ap-baseline-table">
+                    <thead>
+                      <tr>
+                        <th>Account</th><th>Status</th><th>Start (huidig)</th>
+                        <th>Equity nu</th><th>Nieuwe start</th><th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {baselineAccounts.map(a => {
+                        const profit = (a.startingBalance != null && a.currentEquity != null)
+                          ? a.currentEquity - a.startingBalance : null;
+                        return (
+                          <tr key={a.id}>
+                            <td>
+                              <div><strong>{a.broker}</strong></div>
+                              <div className="ap-prog-sub">login {a.login}</div>
+                            </td>
+                            <td>{a.status}</td>
+                            <td>
+                              {a.startingBalance != null
+                                ? <>€{a.startingBalance.toFixed(2)}<div className="ap-prog-sub">{a.startingBalanceSource === "admin_override" ? "✏ admin" : "auto"}</div></>
+                                : <span className="ap-flag-off">—</span>}
+                            </td>
+                            <td>
+                              {a.currentEquity != null ? `€${a.currentEquity.toFixed(2)}` : "—"}
+                              {profit != null && (
+                                <div className={profit >= 0 ? "ap-profit-pos" : "ap-profit-neg"}>
+                                  <span className="ap-prog-sub">{profit >= 0 ? "+" : ""}€{profit.toFixed(2)}</span>
+                                </div>
+                              )}
+                            </td>
+                            <td>
+                              <input
+                                className="ap-modal-input"
+                                style={{ width: "120px" }}
+                                type="number"
+                                step="0.01"
+                                min="0"
+                                value={baselineInputs[a.id] ?? ""}
+                                onChange={e => setBaselineInputs(prev => ({ ...prev, [a.id]: e.target.value }))}
+                                placeholder="0.00"
+                              />
+                            </td>
+                            <td>
+                              <button
+                                className="ap-btn ap-btn-primary"
+                                onClick={() => saveBaseline(a.id)}
+                                disabled={baselineBusy}
+                              >
+                                {baselineBusy ? "…" : "Opslaan"}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              {baselineMsg && (
+                <div className={`ap-modal-msg ${baselineMsg.startsWith("✓") ? "ap-msg-ok" : "ap-msg-err"}`}>
+                  {baselineMsg}
+                </div>
+              )}
+              <div className="ap-modal-hint">
+                Tip: bij een nieuw broker-account vult de hourly snapshot-cron de start-balans automatisch in
+                op het eerste echte snapshot. Override hier alleen voor legacy of als de eerste snap niet klopt.
               </div>
             </div>
           </div>

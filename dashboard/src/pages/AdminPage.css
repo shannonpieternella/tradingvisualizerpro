@@ -365,3 +365,26 @@
 .ap-btn-test { background: rgba(96,165,250,0.10); border: 1px solid rgba(96,165,250,0.3); color: #60a5fa; }
 .ap-btn-test:hover { background: rgba(96,165,250,0.20); }
 .ap-modal-hint { margin-top: 14px; font-size: 11px; color: #6b7280; line-height: 1.5; }
+
+/* Wider modal for tabular content (baseline editor) */
+.ap-modal-wide { max-width: 880px; }
+
+/* Equity-progress columns in subscriptions table */
+.ap-prog-cell      { display: flex; flex-direction: column; gap: 2px; }
+.ap-prog-line      { font-size: 12px; color: #c9d3e3; font-family: monospace; }
+.ap-prog-sub       { font-size: 10px; color: #6b7280; }
+.ap-profit-pos     { color: #4ade80; font-size: 12px; font-weight: 600; font-family: monospace; }
+.ap-profit-neg     { color: #f87171; font-size: 12px; font-weight: 600; font-family: monospace; }
+.ap-fee-share      { color: #fbbf24; font-size: 13px; font-family: monospace; }
+.ap-baseline-btn   {
+  background: rgba(96,165,250,0.10); border: 1px solid rgba(96,165,250,0.25);
+  color: #60a5fa; border-radius: 4px; padding: 1px 6px;
+  font-size: 11px; cursor: pointer; margin-left: 6px;
+}
+.ap-baseline-btn:hover { background: rgba(96,165,250,0.20); }
+
+.ap-baseline-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+.ap-baseline-table th, .ap-baseline-table td {
+  padding: 10px 12px; text-align: left; border-bottom: 1px solid #1a2332; color: #c9d3e3;
+}
+.ap-baseline-table th { color: #9ca3af; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
